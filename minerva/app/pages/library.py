@@ -15,6 +15,7 @@ from minerva.app.app_state import AppState
 from minerva.app.pages.base import BasePage
 from minerva.app.task_runner import TaskRunner
 from minerva.domain.library import LibraryFacets, LibraryItem, LibraryQuery
+from minerva.services.report_acquisition import romm_destination
 from minerva.ui.icons import Icons
 from minerva.ui.models.delegates import (
     CheckboxDelegate,
@@ -617,7 +618,7 @@ class LibraryPage(BasePage):
             return
         output_root = Path(self._settings.value("output_dir", "downloads", str))
         queue_items = [
-            (item.id, str(output_root / item.collection / item.system / item.basename), None)
+            (item.id, str(romm_destination(output_root, item.system, item.basename)), None)
             for item in items
         ]
         controller.add_many_to_queue(queue_items)
