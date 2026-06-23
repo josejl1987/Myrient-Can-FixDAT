@@ -2,7 +2,7 @@
 QFrame#surfacePanel {
     background-color: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 9px;
+    border-radius: 12px;
 }
 QFrame#surfacePanel > QFrame#separator {
     background-color: {{token.border}};
@@ -15,6 +15,7 @@ QWidget#panelHeader {
     background: transparent;
 }
 QLabel#panelHeaderTitle {
+    font-family: "{{token.heading_font}}";
     font-size: 13px;
     font-weight: 650;
 }

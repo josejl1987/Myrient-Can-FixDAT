@@ -23,7 +23,7 @@ class _SpinnerWidget(QtWidgets.QWidget):
     def __init__(
         self,
         size: int = 32,
-        colour: str = "#2f5f9e",
+        colour: str = ThemeTokens().accent,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)

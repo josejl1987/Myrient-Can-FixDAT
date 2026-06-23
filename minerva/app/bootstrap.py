@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 
 def create_application(argv: list[str]) -> QtWidgets.QApplication:
@@ -30,11 +31,19 @@ def create_application(argv: list[str]) -> QtWidgets.QApplication:
     app.setOrganizationName("MinervaFixDAT")
     app.setStyle("Fusion")
 
+    # Load bundled gaming fonts
+    from minerva.ui.theme import ThemeTokens
+
+    tokens = ThemeTokens()
+    font_dir = Path(__file__).resolve().parent.parent / "ui" / "fonts"
+    if font_dir.is_dir():
+        for ttf in sorted(font_dir.glob("*.ttf")):
+            QtGui.QFontDatabase.addApplicationFont(str(ttf))
+
     # Set a concrete default font so custom-painted delegates that read
     # QFont().pixelSize() get a real value (-1 produces QPainter warnings
     # in the Qt log).
-    from PyQt6 import QtGui
-    base_font = QtGui.QFont(app.font())
+    base_font = QtGui.QFont(tokens.body_font, 10)
     if base_font.pointSize() <= 0 and base_font.pixelSize() <= 0:
         base_font.setPointSize(10)
     app.setFont(base_font)
@@ -42,7 +51,7 @@ def create_application(argv: list[str]) -> QtWidgets.QApplication:
     # Apply the design-system theme
     from minerva.ui.theme import apply_theme
 
-    apply_theme(app)
+    apply_theme(app, tokens)
 
     # Initialise QtAwesome global defaults
     from minerva.ui.icons import Icons

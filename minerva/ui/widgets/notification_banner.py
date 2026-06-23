@@ -24,12 +24,14 @@ from minerva.ui.icons import Icons
 from minerva.ui.theme import ThemeTokens
 from minerva.ui.density import Density
 
-_NOTIFICATION_COLORS: dict[str, tuple[str, str]] = {
-    "info": ("#2f5f9e", "#1a2f50"),
-    "success": ("#66c38a", "#1a3a25"),
-    "warning": ("#f0b75c", "#3a2e15"),
-    "error": ("#ef7777", "#3a1a1a"),
-}
+def _notification_colors(tokens: ThemeTokens, kind: str) -> tuple[str, str]:
+    """Return (foreground, background) for a notification kind from tokens."""
+    return {
+        "info": (tokens.info_fg, tokens.info_bg),
+        "success": (tokens.success_fg, tokens.success_bg),
+        "warning": (tokens.warning_fg, tokens.warning_bg),
+        "error": (tokens.error_fg, tokens.error_bg),
+    }.get(kind, (tokens.info_fg, tokens.info_bg))
 
 
 class NotificationBanner(QtWidgets.QFrame):
@@ -198,10 +200,10 @@ class NotificationBanner(QtWidgets.QFrame):
 
     def _apply_background(self) -> None:
         """Set the banner background from the notification colour map."""
-        fg, bg = _NOTIFICATION_COLORS.get(self._kind, ("#2f5f9e", "#1a2f50"))
+        fg, bg = _notification_colors(self._tokens, self._kind)
         self.setStyleSheet(
             f"NotificationBanner {{ background: {bg}; border: 1px solid {fg};"
-            f" border-radius: 6px; }}"
+            f" border-radius: 8px; }}"
         )
 
     def _reposition(self) -> None:

@@ -17,8 +17,8 @@ QFrame#collectionsResultsHeader {
     background: {{token.surface}};
     border: none;
     border-bottom: 1px solid {{token.border}};
-    border-top-left-radius: 9px;
-    border-top-right-radius: 9px;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
 }
 QFrame#collectionsToolbar {
     background: {{token.surface_raised}};
@@ -38,6 +38,7 @@ QTableView#collectionsSystemTable::item:selected {
     border-left: 2px solid {{token.accent}};
 }
 QLabel#collectionInspectorTitle {
+    font-family: "{{token.heading_font}}";
     color: {{token.text}};
     font-size: 17px;
     font-weight: 700;
@@ -73,7 +74,7 @@ QProgressBar#collectionCoverage::chunk {
 QFrame#diagnosticsPanel {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 9px;
+    border-radius: 12px;
 }
 QFrame#diagnosticCard {
     background: {{token.background}};
@@ -83,7 +84,7 @@ QFrame#diagnosticCard {
 QLabel#diagnosticIcon {
     background: {{token.surface_raised}};
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
 }
 QLabel#diagnosticTitle {
     color: {{token.text_muted}};
@@ -91,6 +92,7 @@ QLabel#diagnosticTitle {
     font-weight: 650;
 }
 QLabel#diagnosticValue {
+    font-family: "{{token.heading_font}}";
     color: {{token.text}};
     font-size: 20px;
     font-weight: 720;

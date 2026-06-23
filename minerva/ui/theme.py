@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from minerva.ui.density import Density
 from minerva.ui.qss.loader import load_qss
@@ -11,58 +11,62 @@ from minerva.ui.qss.loader import load_qss
 @dataclass(frozen=True)
 class ThemeTokens:
     # Core surfaces
-    background: str = "#101722"
-    surface: str = "#172230"
-    surface_raised: str = "#1d2a38"
-    border: str = "#2b3a4a"
+    background: str = "#0F172A"
+    surface: str = "#1E293B"
+    surface_raised: str = "#334155"
+    border: str = "#475569"
 
     # Typography
-    text: str = "#eef3f8"
-    text_muted: str = "#94a3b8"
-    disabled_text: str = "#59687a"
-    scrollbar: str = "#3a4a5d"
+    text: str = "#F8FAFC"
+    text_muted: str = "#94A3B8"
+    disabled_text: str = "#475569"
+    scrollbar: str = "#334155"
+
+    # Fonts
+    heading_font: str = "Russo One"
+    body_font: str = "Chakra Petch"
 
     # Semantic accents
-    accent: str = "#3b82f6"
-    accent_hover: str = "#4b8cf7"
-    success: str = "#57c785"
-    warning: str = "#f0ad4e"
-    error: str = "#ef6b73"
-    purple: str = "#a855f7"
+    accent: str = "#22C55E"
+    accent_hover: str = "#16A34A"
+    success: str = "#22C55E"
+    warning: str = "#F0AD4E"
+    error: str = "#EF4444"
+    purple: str = "#A855F7"
 
     # Semantic surfaces (pill backgrounds)
-    success_surface: str = "#153126"
-    success_border: str = "#285f45"
-    warning_surface: str = "#352817"
-    warning_border: str = "#6e5125"
-    error_surface: str = "#351d25"
-    error_border: str = "#71343f"
-    info_surface: str = "#162d49"
-    info_border: str = "#28527f"
-    purple_surface: str = "#2a1d3c"
-    purple_border: str = "#543477"
+    success_surface: str = "#0D2818"
+    success_border: str = "#1A4D2E"
+    warning_surface: str = "#2D2410"
+    warning_border: str = "#5C4819"
+    error_surface: str = "#2D1014"
+    error_border: str = "#5C1F29"
+    info_surface: str = "#0D2840"
+    info_border: str = "#1A4D6E"
+    purple_surface: str = "#1F1430"
+    purple_border: str = "#4A2D6E"
 
     # Semantic surface aliases (fg/bg/border naming) — required by
     # StatusBadge, MetricCard, Banner, Pill semantics.
-    success_fg: str = "#57c785"
-    success_bg: str = "#153126"
-    warning_fg: str = "#f0ad4e"
-    warning_bg: str = "#352817"
-    error_fg: str = "#ef6b73"
-    error_bg: str = "#351d25"
-    info_fg: str = "#3b82f6"
-    info_bg: str = "#162d49"
-    purple_fg: str = "#a855f7"
-    purple_bg: str = "#2a1d3c"
+    success_fg: str = "#22C55E"
+    success_bg: str = "#0D2818"
+    warning_fg: str = "#F0AD4E"
+    warning_bg: str = "#2D2410"
+    error_fg: str = "#EF4444"
+    error_bg: str = "#2D1014"
+    info_fg: str = "#3B82F6"
+    info_bg: str = "#0D2840"
+    purple_fg: str = "#A855F7"
+    purple_bg: str = "#1F1430"
 
     @classmethod
     def for_accent(cls, name: str) -> "ThemeTokens":
         accents = {
-            "blue": "#3b82f6",
-            "purple": "#8b5cf6",
-            "green": "#22c55e",
+            "blue": "#3B82F6",
+            "purple": "#A855F7",
+            "green": "#22C55E",
         }
-        return cls(accent=accents.get(name, accents["blue"]))
+        return cls(accent=accents.get(name, accents["green"]))
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -74,6 +78,8 @@ class ThemeTokens:
             "text_muted": self.text_muted,
             "disabled_text": self.disabled_text,
             "scrollbar": self.scrollbar,
+            "heading_font": self.heading_font,
+            "body_font": self.body_font,
             "accent": self.accent,
             "accent_hover": self.accent_hover,
             "success": self.success,

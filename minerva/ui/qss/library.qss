@@ -5,7 +5,7 @@ QFrame#librarySummaryBar,
 QFrame#facetPanel {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 9px;
+    border-radius: 12px;
 }
 QFrame#libraryToolbar QLineEdit#librarySearchInput {
     background: {{token.background}};
@@ -21,9 +21,9 @@ QFrame#librarySummaryBar { min-height: 54px; }
 QLabel#librarySummaryIcon {
     background: {{token.surface_raised}};
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
 }
-QLabel#librarySummaryValue { color: {{token.text}}; font-size: 13px; font-weight: 700; }
+QLabel#librarySummaryValue { font-family: "{{token.heading_font}}"; color: {{token.text}}; font-size: 13px; font-weight: 700; }
 QLabel#librarySummaryLabel { color: {{token.text_muted}}; font-size: 10px; }
 QFrame#summarySeparator { background: {{token.border}}; border: none; }
 
@@ -31,8 +31,8 @@ QFrame#libraryResultsHeader {
     background: {{token.surface}};
     border: none;
     border-bottom: 1px solid {{token.border}};
-    border-top-left-radius: 9px;
-    border-top-right-radius: 9px;
+    border-top-left-radius: 12px;
+    border-top-right-radius: 12px;
 }
 QTableView#libraryTable {
     background: {{token.surface}};
@@ -68,10 +68,11 @@ QToolButton#facetHeader:hover { color: {{token.accent}}; }
 QLabel#coverPreview {
     background: {{token.background}};
     border: 1px solid {{token.border}};
-    border-radius: 9px;
+    border-radius: 12px;
     padding: 6px;
 }
 QLabel#libraryInspectorTitle {
+    font-family: "{{token.heading_font}}";
     color: {{token.text}};
     font-size: 16px;
     font-weight: 680;
@@ -99,6 +100,6 @@ QPushButton#accentButton {
     background: {{token.accent}};
     color: white;
     border: 1px solid {{token.accent}};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 5px 14px;
 }

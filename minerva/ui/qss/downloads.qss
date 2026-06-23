@@ -5,13 +5,13 @@ QWidget#downloadsPage {
 }
 
 QFrame#downloadConnectionBanner {
-    background: #351d25;
+    background: {{token.error_bg}};
     border: 1px solid {{token.error}};
-    border-radius: 8px;
+    border-radius: 12px;
 }
 
 QFrame#downloadConnectionBanner[connected="true"] {
-    background: #153126;
+    background: {{token.success_bg}};
     border-color: {{token.success}};
 }
 
@@ -35,7 +35,7 @@ QFrame#throughputPanel,
 QFrame#downloadActivityPanel {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 10px;
+    border-radius: 12px;
 }
 
 QFrame#downloadToolbar {
@@ -49,7 +49,7 @@ QLineEdit#downloadSearch {
     padding: 0 12px;
     background: {{token.background}};
     border: 1px solid {{token.border}};
-    border-radius: 7px;
+    border-radius: 8px;
 }
 
 QLineEdit#downloadSearch:focus {
@@ -61,7 +61,7 @@ QTableView#downloadsTable {
     alternate-background-color: {{token.background}};
     border: none;
     gridline-color: transparent;
-    selection-background-color: #1d3b60;
+    selection-background-color: {{token.info_bg}};
     selection-color: {{token.text}};
 }
 
@@ -105,6 +105,7 @@ QLabel#chartPeak {
 
 QLabel#panelTitle,
 QLabel#inspectorSectionTitle {
+    font-family: "{{token.heading_font}}";
     color: {{token.text}};
     font-weight: 700;
     font-size: 14px;
@@ -121,26 +122,27 @@ QLabel#downloadStatusBadge {
 QLabel#downloadStatusBadge[state="downloading"],
 QLabel#downloadStatusBadge[state="starting"] {
     color: {{token.accent}};
-    background: #162d49;
+    background: {{token.info_bg}};
 }
 
 QLabel#downloadStatusBadge[state="seeding"],
 QLabel#downloadStatusBadge[state="completed"] {
     color: {{token.success}};
-    background: #153126;
+    background: {{token.success_bg}};
 }
 
 QLabel#downloadStatusBadge[state="queued"] {
     color: {{token.warning}};
-    background: #352817;
+    background: {{token.warning_bg}};
 }
 
 QLabel#downloadStatusBadge[state="failed"] {
     color: {{token.error}};
-    background: #351d25;
+    background: {{token.error_bg}};
 }
 
 QLabel#downloadInspectorTitle {
+    font-family: "{{token.heading_font}}";
     color: {{token.text}};
     font-weight: 700;
     font-size: 16px;
@@ -162,14 +164,14 @@ QLabel#downloadInspectorPath {
     color: {{token.text}};
     background: {{token.background}};
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 8px;
 }
 
 QLabel#downloadInspectorError {
     color: {{token.error}};
-    background: #351d25;
-    border-radius: 6px;
+    background: {{token.error_bg}};
+    border-radius: 8px;
     padding: 8px;
 }
 
@@ -224,10 +226,10 @@ QPushButton#warningButton {
     color: {{token.warning}};
     background: transparent;
     border: 1px solid {{token.warning}};
-    border-radius: 6px;
+    border-radius: 8px;
     min-height: 34px;
 }
 
 QPushButton#warningButton:hover {
-    background: #352817;
+    background: {{token.warning_bg}};
 }

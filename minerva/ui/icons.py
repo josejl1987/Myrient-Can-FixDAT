@@ -17,6 +17,8 @@ from __future__ import annotations
 import qtawesome as qta
 from PyQt6 import QtGui
 
+from minerva.ui.theme import ThemeTokens
+
 
 class Icons:
     """Named icon factories wrapping ``qtawesome``.
@@ -38,7 +40,7 @@ class Icons:
             # skip initialization — it will happen on the next call once
             # a QApp is available. The flag stays False so we retry.
             return
-        qta.set_defaults(color="#e8eaf0")
+        qta.set_defaults(color=ThemeTokens().text)
         cls._initialized = True
 
     # ── Application ─────────────────────────────────────────────────────
@@ -168,25 +170,25 @@ class Icons:
     def status_success(cls) -> QtGui.QIcon:
         """Green check icon for success notifications."""
         cls._ensure()
-        return qta.icon("fa5s.check-circle", color="#66c38a")
+        return qta.icon("fa5s.check-circle", color=ThemeTokens().success)
 
     @classmethod
     def status_warning(cls) -> QtGui.QIcon:
         """Yellow warning icon."""
         cls._ensure()
-        return qta.icon("fa5s.exclamation-triangle", color="#f0b75c")
+        return qta.icon("fa5s.exclamation-triangle", color=ThemeTokens().warning)
 
     @classmethod
     def status_error(cls) -> QtGui.QIcon:
         """Red error icon."""
         cls._ensure()
-        return qta.icon("fa5s.times-circle", color="#ef7777")
+        return qta.icon("fa5s.times-circle", color=ThemeTokens().error)
 
     @classmethod
     def status_info(cls) -> QtGui.QIcon:
         """Blue info icon."""
         cls._ensure()
-        return qta.icon("fa5s.info-circle", color="#2f5f9e")
+        return qta.icon("fa5s.info-circle", color=ThemeTokens().info_fg)
 
 # Additional dashboard actions are assigned after the class definition to keep
 # compatibility with older imports while expanding the semantic icon surface.

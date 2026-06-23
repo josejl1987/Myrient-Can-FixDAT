@@ -4,6 +4,7 @@
 QWidget {
     background-color: {{token.background}};
     color: {{token.text}};
+    font-family: "{{token.body_font}}";
     font-size: 13px;
 }
 QMainWindow, QWidget#pageSurface { background-color: {{token.background}}; }
@@ -17,24 +18,24 @@ QStatusBar {
 
 /* ── Typography ─────────────────────────────────────────────────────────── */
 QLabel { color: {{token.text}}; background: transparent; }
-QLabel#pageTitle { font-size: 26px; font-weight: 700; }
+QLabel#pageTitle { font-family: "{{token.heading_font}}"; font-size: 28px; font-weight: 700; }
 QLabel#pageSubtitle { color: {{token.text_muted}}; font-size: 12px; }
-QLabel#sectionTitle { font-size: 13px; font-weight: 650; }
+QLabel#sectionTitle { font-family: "{{token.heading_font}}"; font-size: 13px; font-weight: 650; }
 QLabel#mutedLabel, QLabel#metricSubtitle { color: {{token.text_muted}}; font-size: 11px; }
 QLabel#metricTitle { color: {{token.text_muted}}; font-size: 11px; font-weight: 600; }
-QLabel#metricValue { color: {{token.text}}; font-size: 22px; font-weight: 720; }
+QLabel#metricValue { font-family: "{{token.heading_font}}"; color: {{token.text}}; font-size: 24px; font-weight: 720; }
 QLabel#panelCount {
     color: {{token.text_muted}};
     background: {{token.surface_raised}};
     border: 1px solid {{token.border}};
-    border-radius: 9px;
+    border-radius: 12px;
     padding: 1px 7px;
     font-size: 10px;
     font-weight: 600;
 }
 QLabel#resultsCount { color: {{token.text_muted}}; font-size: 11px; min-width: 58px; }
 QLabel#emptyInline { color: {{token.text_muted}}; padding: 24px 10px; }
-QLabel#inspectorTitle { font-size: 15px; font-weight: 650; }
+QLabel#inspectorTitle { font-family: "{{token.heading_font}}"; font-size: 15px; font-weight: 650; }
 QLabel#inspectorSectionTitle {
     color: {{token.text_muted}};
     font-size: 10px;
@@ -68,14 +69,14 @@ QFrame#workspacePanel,
 QFrame#inspectorPanel {
     background-color: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 9px;
+    border-radius: 12px;
 }
 
 QFrame#separator { background-color: {{token.border}}; border: none; max-height: 1px; }
 QFrame#resultsToolbar {
     background: {{token.surface_raised}};
     border: 1px solid {{token.border}};
-    border-radius: 7px;
+    border-radius: 8px;
 }
 QScrollArea#inspectorScroll, QScrollArea#inspectorScroll > QWidget > QWidget {
     background: transparent;
@@ -113,7 +114,7 @@ QLineEdit, QComboBox, QSpinBox {
     color: {{token.text}};
     padding: 3px 9px;
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
     min-height: {{density.control_height}}px;
     font-size: 12px;
 }
@@ -145,7 +146,7 @@ QPushButton {
     color: {{token.text}};
     padding: 4px 12px;
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
     font-size: 12px;
     min-height: {{density.control_height}}px;
 }
@@ -185,13 +186,13 @@ QToolButton#iconButton:hover { background: {{token.surface_raised}}; }
 QFrame#segmentedControl {
     background: {{token.background}};
     border: 1px solid {{token.border}};
-    border-radius: 7px;
+    border-radius: 8px;
 }
 QPushButton#segmentButton {
     background: transparent;
     color: {{token.text_muted}};
     border: none;
-    border-radius: 5px;
+    border-radius: 6px;
     min-height: 28px;
     padding: 2px 10px;
     font-size: 11px;
@@ -243,10 +244,10 @@ QMenu {
     background: {{token.surface}};
     color: {{token.text}};
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 5px;
 }
-QMenu::item { padding: 7px 28px 7px 12px; border-radius: 5px; }
+QMenu::item { padding: 7px 28px 7px 12px; border-radius: 6px; }
 QMenu::item:selected { background: {{token.surface_raised}}; }
 
 /* ── Filter chips ──────────────────────────────────────────────────────── */
@@ -271,7 +272,7 @@ QPushButton#filterChip:checked {
 QLabel#summaryStrip {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 7px 12px;
     color: {{token.text_muted}};
 }
