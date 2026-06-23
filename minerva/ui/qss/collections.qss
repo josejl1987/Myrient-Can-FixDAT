@@ -17,8 +17,8 @@ QFrame#collectionsResultsHeader {
     background: {{token.surface}};
     border: none;
     border-bottom: 1px solid {{token.border}};
-    border-top-left-radius: 12px;
-    border-top-right-radius: 12px;
+    border-top-left-radius: {{token.radius_lg}};
+    border-top-right-radius: {{token.radius_lg}};
 }
 QFrame#collectionsToolbar {
     background: {{token.surface_raised}};
@@ -38,10 +38,10 @@ QTableView#collectionsSystemTable::item:selected {
     border-left: 2px solid {{token.accent}};
 }
 QLabel#collectionInspectorTitle {
-    font-family: "{{token.heading_font}}";
+    font-family: "{{token.body_font}}";
     color: {{token.text}};
     font-size: 17px;
-    font-weight: 700;
+    font-weight: 600;
 }
 QLabel#collectionInspectorSubtitle {
     color: {{token.text_muted}};
@@ -59,7 +59,7 @@ QLabel#collectionInspectorValue {
 QProgressBar#collectionCoverage {
     background: {{token.surface_raised}};
     border: none;
-    border-radius: 5px;
+    border-radius: {{token.radius_sm}};
     min-height: 18px;
     max-height: 18px;
     text-align: center;
@@ -69,22 +69,22 @@ QProgressBar#collectionCoverage {
 }
 QProgressBar#collectionCoverage::chunk {
     background: {{token.accent}};
-    border-radius: 5px;
+    border-radius: {{token.radius_sm}};
 }
 QFrame#diagnosticsPanel {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
-    border-radius: 12px;
+    border-radius: {{token.radius_lg}};
 }
 QFrame#diagnosticCard {
     background: {{token.background}};
     border: 1px solid {{token.border}};
-    border-radius: 8px;
+    border-radius: {{token.radius_md}};
 }
 QLabel#diagnosticIcon {
     background: {{token.surface_raised}};
     border: 1px solid {{token.border}};
-    border-radius: 8px;
+    border-radius: {{token.radius_md}};
 }
 QLabel#diagnosticTitle {
     color: {{token.text_muted}};
@@ -92,10 +92,10 @@ QLabel#diagnosticTitle {
     font-weight: 650;
 }
 QLabel#diagnosticValue {
-    font-family: "{{token.heading_font}}";
+    font-family: "{{token.body_font}}";
     color: {{token.text}};
     font-size: 20px;
-    font-weight: 720;
+    font-weight: 600;
 }
 QLabel#diagnosticDescription {
     color: {{token.text_muted}};

@@ -36,4 +36,4 @@ class SettingsDraft:
     timeout_seconds: int = 1800
     density: Density = Density.COMPACT
     theme: str = ThemeName.DARK
-    accent: str = AccentName.BLUE
+    accent: str = AccentName.GREEN

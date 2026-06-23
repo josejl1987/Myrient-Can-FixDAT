@@ -46,7 +46,7 @@ class StatusBadge(QtWidgets.QLabel):
     def _colour_for_kind(self, kind: BadgeKind) -> tuple[str, str, str]:
         return {
             BadgeKind.NEUTRAL: (self._tokens.text_muted, self._tokens.surface_raised, self._tokens.border),
-            BadgeKind.INFO: (self._tokens.accent, self._tokens.info_surface, self._tokens.info_border),
+            BadgeKind.INFO: (self._tokens.info_fg, self._tokens.info_surface, self._tokens.info_border),
             BadgeKind.SUCCESS: (self._tokens.success, self._tokens.success_surface, self._tokens.success_border),
             BadgeKind.WARNING: (self._tokens.warning, self._tokens.warning_surface, self._tokens.warning_border),
             BadgeKind.ERROR: (self._tokens.error, self._tokens.error_surface, self._tokens.error_border),

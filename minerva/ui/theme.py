@@ -26,6 +26,11 @@ class ThemeTokens:
     heading_font: str = "Russo One"
     body_font: str = "Chakra Petch"
 
+    # Shape tokens
+    radius_sm: str = "4px"
+    radius_md: str = "8px"
+    radius_lg: str = "12px"
+
     # Semantic accents
     accent: str = "#22C55E"
     accent_hover: str = "#16A34A"
@@ -80,6 +85,9 @@ class ThemeTokens:
             "scrollbar": self.scrollbar,
             "heading_font": self.heading_font,
             "body_font": self.body_font,
+            "radius_sm": self.radius_sm,
+            "radius_md": self.radius_md,
+            "radius_lg": self.radius_lg,
             "accent": self.accent,
             "accent_hover": self.accent_hover,
             "success": self.success,
@@ -127,6 +135,13 @@ def build_stylesheet(tokens: ThemeTokens, density: Density) -> str:
         "page_spacing": density.page_spacing,
     }.items():
         qss = qss.replace(f"{{{{density.{name}}}}}", str(value))
+    import re
+    unresolved = re.findall(r"\{\{token\.\w+\}\}", qss)
+    if unresolved:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Unresolved QSS token placeholders: %s", ", ".join(set(unresolved))
+        )
     return qss
 
 

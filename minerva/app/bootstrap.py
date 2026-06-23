@@ -13,11 +13,14 @@ Compatibility::
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+
+logger = logging.getLogger(__name__)
 
 
 def create_application(argv: list[str]) -> QtWidgets.QApplication:
@@ -38,7 +41,9 @@ def create_application(argv: list[str]) -> QtWidgets.QApplication:
     font_dir = Path(__file__).resolve().parent.parent / "ui" / "fonts"
     if font_dir.is_dir():
         for ttf in sorted(font_dir.glob("*.ttf")):
-            QtGui.QFontDatabase.addApplicationFont(str(ttf))
+            font_id = QtGui.QFontDatabase.addApplicationFont(str(ttf))
+            if font_id < 0:
+                logger.warning("Failed to load font: %s", ttf.name)
 
     # Set a concrete default font so custom-painted delegates that read
     # QFont().pixelSize() get a real value (-1 produces QPainter warnings

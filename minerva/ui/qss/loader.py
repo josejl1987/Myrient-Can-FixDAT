@@ -2,8 +2,7 @@
 
 Order (concatenated in this sequence):
 
-    base → layout → controls → tables → navigation → cards →
-    panels → inspectors → actions → states → {library | downloads | collections}
+    base → panels → inspectors → actions → states → {library | downloads | collections}
 
 Page-specific QSS must override a class name introduced in the shared
 layers, not invent new selectors.
@@ -17,11 +16,6 @@ _HERE = Path(__file__).resolve().parent
 
 _SHARED_ORDER = [
     "base.qss",
-    "layout.qss",
-    "controls.qss",
-    "tables.qss",
-    "navigation.qss",
-    "cards.qss",
     "panels.qss",
     "inspectors.qss",
     "actions.qss",
