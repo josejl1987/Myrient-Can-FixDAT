@@ -23,6 +23,18 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 logger = logging.getLogger(__name__)
 
 
+def _resource_root() -> Path:
+    """Resolve the package resource root.
+
+    In a normal dev run this is ``minerva/`` (parent of ``app/``).
+    In a PyInstaller frozen build, resources are extracted to
+    ``sys._MEIPASS`` and ``__file__`` is not reliable.
+    """
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS) / "minerva"  # type: ignore[attr-defined]
+    return Path(__file__).resolve().parent.parent
+
+
 def create_application(argv: list[str]) -> QtWidgets.QApplication:
     """Build and configure the QApplication instance."""
     QtCore.QCoreApplication.setAttribute(
@@ -38,7 +50,7 @@ def create_application(argv: list[str]) -> QtWidgets.QApplication:
     from minerva.ui.theme import ThemeTokens
 
     tokens = ThemeTokens()
-    font_dir = Path(__file__).resolve().parent.parent / "ui" / "fonts"
+    font_dir = _resource_root() / "ui" / "fonts"
     if font_dir.is_dir():
         for ttf in sorted(font_dir.glob("*.ttf")):
             font_id = QtGui.QFontDatabase.addApplicationFont(str(ttf))

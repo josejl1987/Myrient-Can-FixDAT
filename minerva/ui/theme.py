@@ -66,6 +66,14 @@ class ThemeTokens:
 
     @classmethod
     def for_accent(cls, name: str) -> "ThemeTokens":
+        """Return a copy with a different interactive accent colour.
+
+        Only ``accent`` and ``accent_hover`` change.  Semantic colours
+        (``success``, ``warning``, ``error``, ``info_fg``, ``purple``) are
+        intentionally fixed regardless of the chosen accent — green always
+        means success, blue always means info, etc.  This follows universal
+        colour conventions so users never have to learn a custom mapping.
+        """
         accents = {
             "blue": "#3B82F6",
             "purple": "#A855F7",
