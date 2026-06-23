@@ -27,7 +27,7 @@ jobs:
       
       - name: Build executable
         run: |
-          pyinstaller --onefile --windowed --name MyrientCanFixDAT MyrientCanFixDAT.py
+          pyinstaller --onefile --windowed --name MyrientCanFixDAT --add-data "minerva/ui/fonts;minerva/ui/fonts" --add-data "minerva/ui/qss;minerva/ui/qss" minerva_gui.py
       
       - name: Upload Release Asset
         uses: softprops/action-gh-release@v1
