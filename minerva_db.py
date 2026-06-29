@@ -2273,6 +2273,7 @@ class MinervaDB:
         entry: DatEntry,
         collection: str = "",
         system: str = "",
+        conn: sqlite3.Connection | None = None,
     ) -> tuple[dict | None, dict | None]:
         """Return the top two scored candidates for a single entry.
 
@@ -2282,24 +2283,42 @@ class MinervaDB:
         Either or both may be ``None`` (no candidate at all, or only one
         candidate found).  Candidates are never de-duplicated by the
         caller — the margin computation needs both even if they are equal.
+
+        If *conn* is provided, reuse it instead of opening a new connection.
+        This is critical for batch matching — opening a fresh connection
+        per entry destroys the SQLite page cache and is ~20x slower.
         """
         if not self._ready:
             return None, None
         entry_stem = stem_from_romname(entry.filename)
         entry_size = entry.size
 
-        with self.conn() as conn:
-            seen_ids: set[int] = set()
-            tier_sources: dict[int, str] = {}
+        if conn is not None:
+            return self._get_two_best_with_conn(entry, entry_stem, entry_size, collection, system, conn)
+        with self.conn() as c:
+            return self._get_two_best_with_conn(entry, entry_stem, entry_size, collection, system, c)
 
-            # Tier 1: exact stem — no candidate_limit here, we want T1 completely
-            tier1 = self._find_by_stem(entry_stem, collection, system, conn, size=entry_size)
-            for r in tier1:
-                if r["id"] not in seen_ids:
-                    seen_ids.add(r["id"])
-                    tier_sources[r["id"]] = "exact"
+    def _get_two_best_with_conn(
+        self,
+        entry: DatEntry,
+        entry_stem: str,
+        entry_size: int,
+        collection: str,
+        system: str,
+        conn: sqlite3.Connection,
+    ) -> tuple[dict | None, dict | None]:
+        seen_ids: set[int] = set()
+        tier_sources: dict[int, str] = {}
 
-            # Tier 2: FTS5
+        # Tier 1: exact stem — no candidate_limit here, we want T1 completely
+        tier1 = self._find_by_stem(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier1:
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                tier_sources[r["id"]] = "exact"
+
+        # Tier 2: FTS5 — skip if tier 1 already found 2+ exact matches
+        if len(seen_ids) < 2:
             tier2 = self._find_by_fts(entry_stem, collection, system, conn, size=entry_size)
             for r in tier2:
                 if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
@@ -2307,7 +2326,8 @@ class MinervaDB:
                     if r["id"] not in tier_sources:
                         tier_sources[r["id"]] = "fuzzy"
 
-            # Tier 3: trigram
+        # Tier 3: trigram — skip if we already have 2+ candidates
+        if len(seen_ids) < 2:
             tier3 = self._find_by_trigram(entry_stem, collection, system, conn, size=entry_size)
             for r in tier3:
                 if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
@@ -2315,44 +2335,44 @@ class MinervaDB:
                     if r["id"] not in tier_sources:
                         tier_sources[r["id"]] = "fuzzy"
 
-            # Tier 4: keywords — but only if we have fewer than 2 candidates
-            if len(seen_ids) < 2:
-                tier4 = self._find_by_keywords(entry_stem, collection, system, conn, size=entry_size)
-                for r in tier4:
-                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                        seen_ids.add(r["id"])
-                        if r["id"] not in tier_sources:
-                            tier_sources[r["id"]] = "fuzzy"
+        # Tier 4: keywords — but only if we have fewer than 2 candidates
+        if len(seen_ids) < 2:
+            tier4 = self._find_by_keywords(entry_stem, collection, system, conn, size=entry_size)
+            for r in tier4:
+                if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                    seen_ids.add(r["id"])
+                    if r["id"] not in tier_sources:
+                        tier_sources[r["id"]] = "fuzzy"
 
-            # Score all candidates
-            scored: list[dict] = []
-            for cand_id in seen_ids:
-                cand_row = conn.execute(
-                    "SELECT * FROM files WHERE id = ?", (cand_id,)
-                ).fetchone()
-                if cand_row is None:
-                    continue
-                method = tier_sources.get(cand_id, "fuzzy")
-                confidence, reasons = self._score_candidate(
-                    entry_stem, entry_size, cand_row, collection, system,
-                )
-                scored.append({
-                    "file_id": cand_row["id"],
-                    "title": cand_row["stem"],
-                    "collection": cand_row["collection"],
-                    "system": cand_row["system"],
-                    "size": cand_row["size"],
-                    "method": "exact" if method == "exact" else "fuzzy",
-                    "confidence": round(confidence, 4),
-                    "reasons": reasons,
-                })
+        # Score all candidates
+        scored: list[dict] = []
+        for cand_id in seen_ids:
+            cand_row = conn.execute(
+                "SELECT * FROM files WHERE id = ?", (cand_id,)
+            ).fetchone()
+            if cand_row is None:
+                continue
+            method = tier_sources.get(cand_id, "fuzzy")
+            confidence, reasons = self._score_candidate(
+                entry_stem, entry_size, cand_row, collection, system,
+            )
+            scored.append({
+                "file_id": cand_row["id"],
+                "title": cand_row["stem"],
+                "collection": cand_row["collection"],
+                "system": cand_row["system"],
+                "size": cand_row["size"],
+                "method": "exact" if method == "exact" else "fuzzy",
+                "confidence": round(confidence, 4),
+                "reasons": reasons,
+            })
 
-            scored.sort(key=lambda x: -x["confidence"])
-            if not scored:
-                return None, None
-            best = scored[0]
-            second = scored[1] if len(scored) > 1 else None
-            return best, second
+        scored.sort(key=lambda x: -x["confidence"])
+        if not scored:
+            return None, None
+        best = scored[0]
+        second = scored[1] if len(scored) > 1 else None
+        return best, second
 
     @staticmethod
     def _score_candidate(

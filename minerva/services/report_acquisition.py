@@ -846,6 +846,71 @@ def _infer_scope_from_filename(filename: str) -> ReportScope | None:
     return None
 
 
+def _slugify_system(name: str) -> str:
+    """Normalize a system name to a filename-friendly slug for matching.
+
+    'Sega - Saturn' → 'sega-saturn'
+    'Nintendo - Game Boy Color' → 'nintendo-game-boy-color'
+    """
+    import re
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+
+# Cache the slug→(collection, system) lookup so we only hit the DB once.
+_system_slug_cache: dict[str, tuple[str | None, str]] | None = None
+
+
+def _infer_scope_from_system_slug(filename: str) -> ReportScope | None:
+    """Match a DAT filename against known system names in the index.
+
+    Strips common suffixes like '-retool', '-no-intro', then checks if
+    the remaining slug matches any known system. This is a fast O(1)
+    lookup that avoids the expensive entry-by-entry distribution matching.
+    """
+    global _system_slug_cache
+    if _system_slug_cache is None:
+        try:
+            from minerva_db import DEFAULT_INDEX_PATH
+            import sqlite3
+            conn = sqlite3.connect(str(DEFAULT_INDEX_PATH))
+            rows = conn.execute(
+                "SELECT DISTINCT collection, system FROM files WHERE system IS NOT NULL"
+            ).fetchall()
+            conn.close()
+            _system_slug_cache = {}
+            for coll, sys_name in rows:
+                slug = _slugify_system(sys_name)
+                if slug not in _system_slug_cache:
+                    _system_slug_cache[slug] = (coll, sys_name)
+        except Exception:
+            _system_slug_cache = {}
+
+    # Strip common suffixes from the filename
+    import re
+    clean = re.sub(r"-(?:retool|no-intro|redump|retroachievements|ra)$", "", filename.lower())
+    clean = re.sub(r"[^a-z0-9-]", "-", clean).strip("-")
+
+    # Try exact slug match, then progressively shorter prefixes
+    if clean in _system_slug_cache:
+        coll, sys_name = _system_slug_cache[clean]
+        return ReportScope(collection=coll, system=sys_name)
+
+    # Try matching with progressively shorter prefixes of the filename
+    parts = clean.split("-")
+    for length in range(len(parts), 1, -1):
+        candidate = "-".join(parts[:length])
+        if candidate in _system_slug_cache:
+            coll, sys_name = _system_slug_cache[candidate]
+            return ReportScope(collection=coll, system=sys_name)
+
+    # Try matching where a cache key starts with the filename
+    # (e.g. 'sega-mega-drive' matches 'sega-mega-drive-genesis')
+    for slug, (coll, sys_name) in _system_slug_cache.items():
+        if slug.startswith(clean + "-") or clean.startswith(slug + "-"):
+            return ReportScope(collection=coll, system=sys_name)
+    return None
+
+
 def _infer_scope_from_distribution(
     entries: list[DatEntry],
     db: MinervaDB | None = None,
@@ -1011,6 +1076,11 @@ class ReportAcquisitionService:
         if scope is not None:
             return scope
 
+        # 3b. Fast filename-to-system lookup from the index
+        scope = _infer_scope_from_system_slug(path.stem)
+        if scope is not None:
+            return scope
+
         # 4. Candidate distribution — needs to parse entries first
         info = (
             parse_rv_fix_csv(path)
@@ -1152,6 +1222,7 @@ class ReportAcquisitionService:
         entry: DatEntry,
         scope: ReportScope,
         policy: MatchPolicy,
+        conn: object | None = None,
     ) -> tuple[ResolutionState, int | None, str | None, float | None]:
         """Classify a single entry using margin-based classification.
 
@@ -1161,7 +1232,7 @@ class ReportAcquisitionService:
         system = scope.system or ""
 
         best, second = self._db.get_two_best_candidates(
-            entry, collection=collection, system=system,
+            entry, collection=collection, system=system, conn=conn,
         )
 
         # No candidate
@@ -1277,64 +1348,75 @@ class ReportAcquisitionService:
         entries: list[ReviewEntry] = []
         counts = AcquisitionSummary()
 
-        for ordinal, dat_entry in enumerate(dat_entries):
-            resolution, file_id, method, confidence = self._classify(
-                dat_entry, scope, policy,
-            )
-
-            if resolution == ResolutionState.REVIEW_REQUIRED:
-                romresolve_id = self._try_romresolve(dat_entry, scope)
-                if romresolve_id is not None:
-                    resolution = ResolutionState.READY
-                    file_id = romresolve_id
-                    method = "romresolve"
-                    confidence = 1.0
-
-            # Map resolution → decision for backward compat
-            if resolution == ResolutionState.READY:
-                decision = "accept"
-            elif resolution == ResolutionState.REVIEW_REQUIRED:
-                decision = "pending"
-            elif resolution == ResolutionState.NOT_FOUND:
-                decision = "reject"
-            else:
-                decision = "reject"
-
-            # Update counts
-            if resolution == ResolutionState.READY:
-                counts = AcquisitionSummary(
-                    ready=counts.ready + 1,
-                    review_required=counts.review_required,
-                    not_found=counts.not_found,
-                    ignored=counts.ignored,
+        # Open one SQLite connection for the entire batch — reusing the
+        # page cache across entries is ~20x faster than opening per entry.
+        import sqlite3
+        from minerva_db import DEFAULT_INDEX_PATH
+        _batch_conn = sqlite3.connect(str(DEFAULT_INDEX_PATH))
+        _batch_conn.row_factory = sqlite3.Row
+        _batch_conn.execute("PRAGMA mmap_size = 268435456")
+        _batch_conn.execute("PRAGMA temp_store = MEMORY")
+        _batch_conn.execute("PRAGMA cache_size = -8000000")
+        try:
+            for ordinal, dat_entry in enumerate(dat_entries):
+                resolution, file_id, method, confidence = self._classify(
+                    dat_entry, scope, policy, conn=_batch_conn,
                 )
-            elif resolution == ResolutionState.REVIEW_REQUIRED:
-                counts = AcquisitionSummary(
-                    ready=counts.ready,
-                    review_required=counts.review_required + 1,
-                    not_found=counts.not_found,
-                    ignored=counts.ignored,
-                )
-            elif resolution == ResolutionState.NOT_FOUND:
-                counts = AcquisitionSummary(
-                    ready=counts.ready,
-                    review_required=counts.review_required,
-                    not_found=counts.not_found + 1,
-                    ignored=counts.ignored,
-                )
+                if resolution == ResolutionState.REVIEW_REQUIRED:
+                    romresolve_id = self._try_romresolve(dat_entry, scope)
+                    if romresolve_id is not None:
+                        resolution = ResolutionState.READY
+                        file_id = romresolve_id
+                        method = "romresolve"
+                        confidence = 1.0
 
-            entries.append(ReviewEntry(
-                id=f"{report_id}_{ordinal}",
-                report_id=report_id,
-                ordinal=ordinal,
-                filename=dat_entry.filename,
-                size=dat_entry.size,
-                automatic_file_id=file_id,
-                automatic_method=method,
-                automatic_confidence=confidence,
-                resolution=resolution,
-                decision=decision,
-            ))
+                # Map resolution → decision for backward compat
+                if resolution == ResolutionState.READY:
+                    decision = "accept"
+                elif resolution == ResolutionState.REVIEW_REQUIRED:
+                    decision = "pending"
+                elif resolution == ResolutionState.NOT_FOUND:
+                    decision = "reject"
+                else:
+                    decision = "reject"
+
+                # Update counts
+                if resolution == ResolutionState.READY:
+                    counts = AcquisitionSummary(
+                        ready=counts.ready + 1,
+                        review_required=counts.review_required,
+                        not_found=counts.not_found,
+                        ignored=counts.ignored,
+                    )
+                elif resolution == ResolutionState.REVIEW_REQUIRED:
+                    counts = AcquisitionSummary(
+                        ready=counts.ready,
+                        review_required=counts.review_required + 1,
+                        not_found=counts.not_found,
+                        ignored=counts.ignored,
+                    )
+                elif resolution == ResolutionState.NOT_FOUND:
+                    counts = AcquisitionSummary(
+                        ready=counts.ready,
+                        review_required=counts.review_required,
+                        not_found=counts.not_found + 1,
+                        ignored=counts.ignored,
+                    )
+
+                entries.append(ReviewEntry(
+                    id=f"{report_id}_{ordinal}",
+                    report_id=report_id,
+                    ordinal=ordinal,
+                    filename=dat_entry.filename,
+                    size=dat_entry.size,
+                    automatic_file_id=file_id,
+                    automatic_method=method,
+                    automatic_confidence=confidence,
+                    resolution=resolution,
+                    decision=decision,
+                ))
+        finally:
+            _batch_conn.close()
 
         # Atomically replace entries
         self._state.replace_entries(report_id, entries)
