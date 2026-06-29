@@ -212,6 +212,7 @@ class ReportNavigator(QtWidgets.QFrame):
     current_report_changed = QtCore.pyqtSignal(object)
     report_activated = QtCore.pyqtSignal(object)
     context_menu_requested = QtCore.pyqtSignal(object, QtCore.QPoint)
+    selection_changed = QtCore.pyqtSignal(list)  # list[ReportSummary]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -298,14 +299,15 @@ class ReportNavigator(QtWidgets.QFrame):
         self.view = QtWidgets.QListView()
         self.view.setObjectName("reportNavigator")
         self.view.setModel(self.proxy)
-        self.view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.view.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.view.setMouseTracking(True)
         self.delegate = _ReportDelegate(parent=self.view)
         self.view.setItemDelegate(self.delegate)
         self.view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-        self.view.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self.view.selectionModel().currentChanged.connect(self._on_current_changed)
+        self.view.selectionModel().selectionChanged.connect(self._on_selection_set_changed)
         self.view.doubleClicked.connect(self._on_activated)
         self.view.customContextMenuRequested.connect(self._on_context_menu)
         root.addWidget(self.view, 1)
@@ -386,10 +388,25 @@ class ReportNavigator(QtWidgets.QFrame):
         source = self.proxy.mapToSource(proxy_index)
         return self.model.report_at(source.row())
 
-    def _on_selection_changed(self) -> None:
-        report = self.current_report()
-        if report is not None:
-            self.current_report_changed.emit(report)
+    def selected_reports(self) -> list[ReportSummary]:
+        """All reports under the current multi-selection (filtered by proxy)."""
+        reports: list[ReportSummary] = []
+        for proxy_index in self.view.selectionModel().selectedIndexes():
+            source = self.proxy.mapToSource(proxy_index)
+            report = self.model.report_at(source.row())
+            if report is not None and report not in reports:
+                reports.append(report)
+        return reports
+
+    def _on_current_changed(self, current: QtCore.QModelIndex, _previous: QtCore.QModelIndex) -> None:
+        """Focus moved — drives the entry table + MatchDetailPanel review flow."""
+        source = self.proxy.mapToSource(current) if current.isValid() else None
+        report = self.model.report_at(source.row()) if source and source.isValid() else None
+        self.current_report_changed.emit(report)
+
+    def _on_selection_set_changed(self, _selected, _deselected) -> None:
+        """Multi-selection set changed — drives the batch toolbar."""
+        self.selection_changed.emit(self.selected_reports())
 
     def _on_activated(self, index: QtCore.QModelIndex) -> None:
         source = self.proxy.mapToSource(index)
