@@ -24,15 +24,23 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Collection, Sequence
+from typing import Any, Callable, Collection, Sequence
 
 # ── Domain type imports (graceful fallback for early bootstrap) ────────────────
 _HAS_DOMAIN = False
 try:
-    from minerva.domain.library import FacetCount, LibraryFacets, LibraryItem, LibraryQuery
-    from minerva.domain.downloads import DownloadFileSpec
     from minerva.domain.collections import (
-        IndexOverview, CollectionSummary, SystemSummary, CollectionStatus,
+        CollectionStatus,
+        CollectionSummary,
+        IndexOverview,
+        SystemSummary,
+    )
+    from minerva.domain.downloads import DownloadFileSpec
+    from minerva.domain.library import (
+        FacetCount,
+        LibraryFacets,
+        LibraryItem,
+        LibraryQuery,
     )
     _HAS_DOMAIN = True
 except ImportError:
@@ -378,8 +386,9 @@ def _is_fix_status(status: str) -> bool:
 _PAREN_STRIP = re.compile(r"\s*\([^)]*\)")
 _PUNCT = re.compile(r"[.,!?;:'\"`]+")
 _BROS = re.compile(r"\bbrothers\b", re.IGNORECASE)
+_ID_WORD = re.compile(r"\bid\b")
 
-_DAT_PREFIX = re.compile(r"(?i)^fixdat[_\s-]*")
+_DAT_PREFIX = re.compile(r"(?i)^(?:fixdat|romresolve\s+fixdat)\s*[—\-:]\s*|^(?:fixdat|romresolve\s+fixdat)[_\s-]*")
 _DAT_DATE_SUFFIX = re.compile(
     r"\s*\((?:\d{8}-\d{6}|\d{4}-\d{2}-\d{2}(?:[ T]\d{2}[-:]\d{2}[-:]\d{2})?)\)$"
 )
@@ -1180,7 +1189,8 @@ class MinervaDB:
     # ── Public API ─────────────────────────────────────────────────────────
     def get_collections(self) -> list[str]:
         """Return sorted list of distinct collections."""
-        if not self._ready: return []
+        if not self._ready:
+            return []
         with self.conn() as c:
             rows = c.execute(
                 "SELECT DISTINCT collection FROM files ORDER BY collection"
@@ -1189,7 +1199,8 @@ class MinervaDB:
 
     def get_collection_system_pairs(self) -> list[tuple[str, str]]:
         """Return all distinct (collection, system) pairs sorted by collection then system."""
-        if not self._ready: return []
+        if not self._ready:
+            return []
         with self.conn() as c:
             rows = c.execute(
                 "SELECT DISTINCT collection, system FROM files ORDER BY collection, system"
@@ -1198,7 +1209,8 @@ class MinervaDB:
 
     def get_systems(self, collection: str | None = None) -> list[str]:
         """Return sorted list of distinct systems, optionally filtered by collection."""
-        if not self._ready: return []
+        if not self._ready:
+            return []
         with self.conn() as c:
             if collection:
                 rows = c.execute(
@@ -1211,7 +1223,8 @@ class MinervaDB:
 
     def get_tags(self) -> list[str]:
         """Return sorted list of distinct tags from the file_tags table."""
-        if not self._ready: return []
+        if not self._ready:
+            return []
         with self.conn() as c:
             rows = c.execute(
                 "SELECT DISTINCT tag FROM file_tags ORDER BY tag"
@@ -1348,12 +1361,12 @@ class MinervaDB:
             params: list[Any] = []
 
             if rowid_filters:
-                ids = set(rowid_filters[0])
+                common_ids: set[int] = set(rowid_filters[0])
                 for subset in rowid_filters[1:]:
-                    ids &= set(subset)
-                if not ids:
+                    common_ids &= set(subset)
+                if not common_ids:
                     return [], 0
-                sorted_ids = sorted(ids)
+                sorted_ids = sorted(common_ids)
                 placeholders = ",".join("?" * len(sorted_ids))
                 parts.append(f"id IN ({placeholders})")
                 params.extend(sorted_ids)
@@ -1454,7 +1467,7 @@ class MinervaDB:
             MatchReport with matched rows, unmatched entries, and per-entry results.
         """
         if not self._ready:
-            return MatchReport(matched=[], unmatched=list(entries), results=[])
+            return MatchReport(matched=[], matched_stems=set(), unmatched=list(entries), results=[])
         t0 = time.time()
 
         # Check cache
@@ -1818,7 +1831,7 @@ class MinervaDB:
             region_rows = c.execute(
                 "SELECT fr.region AS value, COUNT(DISTINCT fr.file_id) AS count "
                 "FROM file_regions fr JOIN files f ON f.id = fr.file_id "
-                f"WHERE {re.sub(r'\\bid\\b', 'f.id', region_where)} "
+                f"WHERE {_ID_WORD.sub('f.id', region_where)} "
                 "GROUP BY fr.region ORDER BY count DESC, value ASC",
                 region_params,
             ).fetchall()
@@ -1829,7 +1842,7 @@ class MinervaDB:
             tag_rows = c.execute(
                 "SELECT ft.tag AS value, COUNT(DISTINCT ft.file_id) AS count "
                 "FROM file_tags ft JOIN files f ON f.id = ft.file_id "
-                f"WHERE {re.sub(r'\\bid\\b', 'f.id', tag_where)} "
+                f"WHERE {_ID_WORD.sub('f.id', tag_where)} "
                 "GROUP BY ft.tag ORDER BY count DESC, value ASC",
                 tag_params,
             ).fetchall()
@@ -1876,7 +1889,8 @@ class MinervaDB:
         """Fetch multiple files by their primary key IDs."""
         if not _HAS_DOMAIN:
             raise RuntimeError("Domain types not available")
-        if not self._ready: return []
+        if not self._ready:
+            return []
         if not file_ids:
             return []
 
@@ -1957,7 +1971,8 @@ class MinervaDB:
         """Return per-collection summary rows."""
         if not _HAS_DOMAIN:
             raise RuntimeError("Domain types not available")
-        if not self._ready: return []
+        if not self._ready:
+            return []
 
         with self.conn() as c:
             rows = c.execute("""
@@ -1990,7 +2005,8 @@ class MinervaDB:
         """Return per-system summary for a collection."""
         if not _HAS_DOMAIN:
             raise RuntimeError("Domain types not available")
-        if not self._ready: return []
+        if not self._ready:
+            return []
 
         with self.conn() as c:
             rows = c.execute("""
@@ -2023,7 +2039,8 @@ class MinervaDB:
 
     def get_index_runs(self, limit: int = 10) -> list[dict[str, Any]]:
         """Return recent index build records, newest first."""
-        if not self._ready: return []
+        if not self._ready:
+            return []
         with self.conn() as c:
             rows = c.execute(
                 "SELECT id, started_at, completed_at, status, torrent_count, "
@@ -2266,7 +2283,8 @@ class MinervaDB:
         candidate found).  Candidates are never de-duplicated by the
         caller — the margin computation needs both even if they are equal.
         """
-        if not self._ready: return None, None
+        if not self._ready:
+            return None, None
         entry_stem = stem_from_romname(entry.filename)
         entry_size = entry.size
 
