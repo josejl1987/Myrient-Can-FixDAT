@@ -20,6 +20,7 @@ from minerva.domain.reports import (
     AcquisitionPlan,
     AcquisitionSummary,
     MatchPolicy,
+    FolderImportSummary,
     QueueResult,
     ReportOutcome,
     ReportScope,
@@ -1097,8 +1098,49 @@ class ReportAcquisitionService:
             )
             for i, entry in enumerate(info.entries)
         ]
-        self._state.replace_entries(report.id, entries)
         return report
+
+    _FIXDAT_EXTENSIONS = {".dat", ".csv", ".fixdat"}
+
+    @staticmethod
+    def collect_fixdat_files(root: Path) -> list[Path]:
+        """Recursively collect .dat/.csv/.fixdat files under *root*."""
+        files: list[Path] = []
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in ReportAcquisitionService._FIXDAT_EXTENSIONS:
+                files.append(path)
+        return sorted(files)
+
+    @staticmethod
+    def import_folder(
+        service: "ReportAcquisitionService",
+        root: Path,
+    ) -> FolderImportSummary:
+        """Import + match every fixdat file under *root* (recursive).
+
+        Best-effort: ScopeInferenceRequired / empty-report → skip with
+        reason; any other exception → failed; log + continue. Never raises.
+        """
+        imported = skipped = failed = 0
+        for path in ReportAcquisitionService.collect_fixdat_files(root):
+            try:
+                report = service.import_report(path)
+            except ScopeInferenceRequired:
+                log.info("import_folder: skip %s (scope ambiguous)", path)
+                skipped += 1
+                continue
+            except Exception as exc:
+                log.warning("import_folder: failed %s: %s", path, exc)
+                failed += 1
+                continue
+            try:
+                service.match_report(report.id)
+            except Exception as exc:
+                log.warning("import_folder: match failed for %s: %s", path, exc)
+                failed += 1
+                continue
+            imported += 1
+        return FolderImportSummary(imported=imported, skipped=skipped, failed=failed)
 
     def _classify(
         self,

@@ -90,6 +90,12 @@ class QueueResult:
         )
 
 @dataclass(frozen=True)
+class FolderImportSummary:
+    imported: int
+    skipped: int   # scope inference ambiguous / empty report
+    failed: int    # parse error or other exception
+
+@dataclass(frozen=True)
 class ReportScope:
     collection: str | None
     system: str | None

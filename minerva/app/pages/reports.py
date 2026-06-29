@@ -29,7 +29,7 @@ from minerva.ui.widgets.property_list import PropertyList
 from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
 from minerva.app.task_runner import TaskRunner
 from minerva.services.report_acquisition import ReportAcquisitionService, romm_destination
-from minerva.domain.reports import QueueResult, ReportSummary, ReviewEntry
+from minerva.domain.reports import FolderImportSummary, QueueResult, ReportSummary, ReviewEntry
 from minerva.ui.icons import Icons
 from minerva.ui.models.delegates import DisplayDelegate, SizeDelegate
 from minerva.ui.models.record_model import ColumnSpec, RecordListModel
@@ -243,6 +243,7 @@ class ReportsPage(BasePage):
             "Import and review repair reports",
         )
         self._import_btn = self._header.add_action("Add report", Icons.add(), primary=True)
+        self._import_folder_btn = self._header.add_action("Import folder", Icons.folder_open())
         self._rematch_btn = self._header.add_action("Match again", Icons.refresh())
         self._queue_all_btn = self._header.add_action("Queue all ready", Icons.download())
         self._delete_btn = self._header.add_action("Remove", Icons.trash(), danger=True)
@@ -258,6 +259,7 @@ class ReportsPage(BasePage):
                      self._export_selected_btn, self._delete_selected_btn):
             _btn.setEnabled(False)
         self._import_btn.clicked.connect(self._on_import)
+        self._import_folder_btn.clicked.connect(self._on_import_folder)
         self._rematch_btn.clicked.connect(self._rematch_selected)
         self._queue_all_btn.clicked.connect(self._queue_all_ready)
         self._delete_btn.clicked.connect(self._delete_selected)
@@ -666,6 +668,51 @@ class ReportsPage(BasePage):
         )
         for path in paths:
             self._import_file(Path(path))
+
+    def _on_import_folder(self) -> None:
+        """Recursively import + match every fixdat file from a chosen folder."""
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Import fix reports from folder")
+        if not folder:
+            return
+        self._set_state(ReportsPageState.LOADING)
+        self._generation += 1
+        gen = self._generation
+        svc = self._build_acquisition_service()
+        task = TaskRunner.wrap_result(
+            ReportAcquisitionService.import_folder, svc, Path(folder),
+        )
+        task.signals.result.connect(
+            lambda payload: self._on_folder_import_result(gen, Path(folder), payload),
+        )
+        task.signals.error.connect(
+            lambda details: self._on_match_error(gen, "", details),
+        )
+        self._pool.start(task)
+
+    def _on_folder_import_result(self, generation: int, folder: Path, payload) -> None:
+        if generation != self._generation:
+            return
+        from minerva.ui.result import OperationResult
+        if isinstance(payload, OperationResult) and not payload.success:
+            self._error_state.set_description(str(payload.error or payload.message or "Import failed"))
+            self._set_state(ReportsPageState.ERROR)
+            return
+        data = payload.payload if isinstance(payload, OperationResult) else payload
+        self.refresh()
+        if not isinstance(data, FolderImportSummary):
+            self._set_state(ReportsPageState.RESULTS)
+            return
+        if data.failed or data.skipped:
+            NotificationBanner.show_warning(
+                self, "Folder import complete",
+                f"Imported {data.imported}, skipped {data.skipped}, "
+                f"failed {data.failed} from {folder}",
+            )
+        else:
+            NotificationBanner.show_success(
+                self, "Folder imported",
+                f"Imported {data.imported} report(s) from {folder}",
+            )
 
     def _import_file(self, path: Path, report_id: str | None = None) -> None:
         try:
