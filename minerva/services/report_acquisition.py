@@ -1347,21 +1347,92 @@ class ReportAcquisitionService:
 
         entries: list[ReviewEntry] = []
         counts = AcquisitionSummary()
-
+        collection = scope.collection or ""
+        system = scope.system or ""
         # Open one SQLite connection for the entire batch — reusing the
         # page cache across entries is ~20x faster than opening per entry.
         import sqlite3
-        from minerva_db import DEFAULT_INDEX_PATH
+        from minerva_db import DEFAULT_INDEX_PATH, stem_from_romname
         _batch_conn = sqlite3.connect(str(DEFAULT_INDEX_PATH))
         _batch_conn.row_factory = sqlite3.Row
         _batch_conn.execute("PRAGMA mmap_size = 268435456")
         _batch_conn.execute("PRAGMA temp_store = MEMORY")
         _batch_conn.execute("PRAGMA cache_size = -8000000")
         try:
+            # ── Fast path: batch tier-1 exact-stem lookup ───────────────
+            # Query all stems in one SQL instead of 60K individual queries.
+            stems_to_entries: dict[str, list[int]] = {}
+            all_stems: list[str] = []
             for ordinal, dat_entry in enumerate(dat_entries):
+                s = stem_from_romname(dat_entry.filename)
+                stems_to_entries.setdefault(s, []).append(ordinal)
+                all_stems.append(s)
+
+            _batch_conn.execute("CREATE TEMP TABLE _match_stems (stem TEXT)")
+            _batch_conn.executemany(
+                "INSERT INTO _match_stems VALUES (?)", [(s,) for s in all_stems],
+            )
+            coll_sql = "AND f.collection = ?" if collection else ""
+            sys_sql = "AND f.system = ?" if system else ""
+            params = []
+            if collection:
+                params.append(collection)
+            if system:
+                params.append(system)
+            stem_rows = _batch_conn.execute(
+                f"SELECT f.* FROM files f "
+                f"INNER JOIN _match_stems s ON f.stem = s.stem "
+                f"WHERE 1=1 {coll_sql} {sys_sql} "
+                f"ORDER BY f.stem, f.size DESC",
+                params,
+            ).fetchall()
+            _batch_conn.execute("DROP TABLE _match_stems")
+
+            stem_to_files: dict[str, list[sqlite3.Row]] = {}
+            for row in stem_rows:
+                stem_to_files.setdefault(row["stem"], []).append(row)
+
+            # Classify entries that have exact stem matches (fast path)
+            unmatched_ordinals: list[int] = []
+            for ordinal, dat_entry in enumerate(dat_entries):
+                s = all_stems[ordinal]
+                candidates = stem_to_files.get(s, [])
+                if candidates:
+                    best = candidates[0]
+                    confidence = 1.0
+                    if dat_entry.size > 0 and best["size"] > 0:
+                        size_diff = abs(best["size"] - dat_entry.size) / max(best["size"], 1)
+                        if size_diff > 0.1:
+                            confidence = 0.92
+
+                    entries.append(ReviewEntry(
+                        id=f"{report_id}_{ordinal}",
+                        report_id=report_id,
+                        ordinal=ordinal,
+                        filename=dat_entry.filename,
+                        size=dat_entry.size,
+                        automatic_file_id=best["id"],
+                        automatic_method="exact",
+                        automatic_confidence=confidence,
+                        resolution=ResolutionState.READY,
+                        decision="accept",
+                    ))
+                    counts = AcquisitionSummary(
+                        ready=counts.ready + 1,
+                        review_required=counts.review_required,
+                        not_found=counts.not_found,
+                        ignored=counts.ignored,
+                    )
+                else:
+                    unmatched_ordinals.append(ordinal)
+
+            # ── Slow path: per-entry FTS/trigram for unmatched entries ───
+            for ordinal in unmatched_ordinals:
+                dat_entry = dat_entries[ordinal]
                 resolution, file_id, method, confidence = self._classify(
                     dat_entry, scope, policy, conn=_batch_conn,
                 )
+
                 if resolution == ResolutionState.REVIEW_REQUIRED:
                     romresolve_id = self._try_romresolve(dat_entry, scope)
                     if romresolve_id is not None:
@@ -1370,17 +1441,13 @@ class ReportAcquisitionService:
                         method = "romresolve"
                         confidence = 1.0
 
-                # Map resolution → decision for backward compat
                 if resolution == ResolutionState.READY:
                     decision = "accept"
                 elif resolution == ResolutionState.REVIEW_REQUIRED:
                     decision = "pending"
-                elif resolution == ResolutionState.NOT_FOUND:
-                    decision = "reject"
                 else:
                     decision = "reject"
 
-                # Update counts
                 if resolution == ResolutionState.READY:
                     counts = AcquisitionSummary(
                         ready=counts.ready + 1,
