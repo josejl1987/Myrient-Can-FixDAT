@@ -1597,6 +1597,45 @@ class ReportAcquisitionService:
         """
         return self.match_report(report_id, policy=policy)
 
+    def export_reviewed(self, report_id: str, dest_path: Path) -> int:
+        """Write a synthetic DAT of approved entries to *dest_path*.
+
+        Approved = ``decision in {"accept", "fuzzy"}`` and has a
+        ``selected_file_id`` or ``automatic_file_id``. Returns the count
+        written; writes nothing and returns 0 if no approved entries or
+        none resolve in the index.
+
+        Wraps ``MinervaDB.build_synthetic_dat`` — same policy as the
+        former ``ReportsPage._export_reviewed`` so UI and CLI share one
+        definition of "approved".
+        """
+        entries = self._state.get_entries(report_id)
+        ids = [
+            entry.selected_file_id or entry.automatic_file_id
+            for entry in entries
+            if entry.decision in {"accept", "fuzzy"}
+            and (entry.selected_file_id or entry.automatic_file_id)
+        ]
+        if not ids:
+            return 0
+        db = self._db or MinervaDB()
+        items = db.get_files_by_ids(ids)
+        if not items:
+            return 0
+        rows = [
+            {"stem": item.stem, "basename": item.basename, "size": item.size}
+            for item in items
+        ]
+        report = self._state.get_report(report_id)
+        name = report.name if report else "reviewed"
+        system = report.system if report else ""
+        collection = report.collection if report else ""
+        dest_path.write_text(
+            db.build_synthetic_dat(rows, f"{name} reviewed", system, collection),
+            encoding="utf-8",
+        )
+        return len(items)
+
     def queue_all_ready(
         self,
         *,
