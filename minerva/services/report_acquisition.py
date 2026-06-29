@@ -1426,88 +1426,158 @@ class ReportAcquisitionService:
                 else:
                     unmatched_ordinals.append(ordinal)
 
-            # ── Slow path: per-entry FTS/trigram for unmatched entries ───
-            # Cap at 200 entries through the slow path. If more remain,
-            # mark them NOT_FOUND — the user can rematch individually.
-            SLOW_PATH_LIMIT = 200
-            if len(unmatched_ordinals) > SLOW_PATH_LIMIT:
-                capped, overflow = unmatched_ordinals[:SLOW_PATH_LIMIT], unmatched_ordinals[SLOW_PATH_LIMIT:]
-                for ordinal in overflow:
+            # ── Slow path: batch FTS5 JOIN for unmatched entries ────────
+            # Instead of per-entry FTS5 queries, batch all unmatched stems
+            # into a temp table and JOIN against files_fts in one query.
+            # Per research: ANALYZE must have been run for the planner to
+            # choose the right join strategy with FTS5 virtual tables.
+            if unmatched_ordinals:
+                _batch_conn.execute("CREATE TEMP TABLE _unmatched (idx INT, stem TEXT)")
+                _batch_conn.executemany(
+                    "INSERT INTO _unmatched VALUES (?, ?)",
+                    [(o, all_stems[o]) for o in unmatched_ordinals],
+                )
+                # Batch FTS5 JOIN: one query for all unmatched stems
+                try:
+                    fts_matches = _batch_conn.execute(
+                        "SELECT u.idx, f.id, f.stem, f.collection, f.system, f.size, "
+                        "bm25(files_fts) AS score "
+                        "FROM _unmatched u "
+                        "JOIN files_fts ON files_fts MATCH u.stem "
+                        "JOIN files f ON f.rowid = files_fts.rowid "
+                        "ORDER BY u.idx, score"
+                    ).fetchall()
+                except Exception:
+                    fts_matches = []
+                _batch_conn.execute("DROP TABLE _unmatched")
+
+                # Group FTS matches by entry index
+                matches_by_ordinal: dict[int, list[tuple]] = {}
+                for row in fts_matches:
+                    matches_by_ordinal.setdefault(row["idx"], []).append((
+                        row["id"], row["stem"], row["collection"],
+                        row["system"], row["size"], row["score"],
+                    ))
+
+                from minerva_db import core_title, stems_match
+
+                for ordinal in unmatched_ordinals:
                     dat_entry = dat_entries[ordinal]
+                    candidates = matches_by_ordinal.get(ordinal, [])
+
+                    if not candidates:
+                        entries.append(ReviewEntry(
+                            id=f"{report_id}_{ordinal}",
+                            report_id=report_id,
+                            ordinal=ordinal,
+                            filename=dat_entry.filename,
+                            size=dat_entry.size,
+                            automatic_file_id=None,
+                            automatic_method=None,
+                            automatic_confidence=None,
+                            resolution=ResolutionState.NOT_FOUND,
+                            decision="reject",
+                        ))
+                        counts = AcquisitionSummary(
+                            ready=counts.ready,
+                            review_required=counts.review_required,
+                            not_found=counts.not_found + 1,
+                            ignored=counts.ignored,
+                        )
+                        continue
+
+                    # Score candidates and pick best
+                    best_file_id = None
+                    best_method = "fuzzy"
+                    best_confidence = 0.0
+                    for file_id, file_stem, file_coll, file_sys, file_size, _score in candidates:
+                        if not stems_match(all_stems[ordinal], file_stem):
+                            continue
+                        if core_title(all_stems[ordinal]) == core_title(file_stem):
+                            conf = 0.96
+                        else:
+                            conf = 0.70
+                        if dat_entry.size > 0 and file_size > 0:
+                            if abs(file_size - dat_entry.size) / max(file_size, 1) <= 0.1:
+                                conf += 0.03
+                            else:
+                                conf -= 0.08
+                        if file_coll == collection:
+                            conf += 0.01
+                        if file_sys == system:
+                            conf += 0.01
+                        conf = max(0.0, min(1.0, conf))
+                        if conf > best_confidence:
+                            best_confidence = conf
+                            best_file_id = file_id
+                            best_method = "exact" if conf >= 0.96 else "fuzzy"
+
+                    if best_file_id is not None and best_confidence >= 0.5:
+                        matched_row = next(
+                            (c for c in candidates if c[0] == best_file_id), None
+                        )
+                        if policy.require_same_system and system and matched_row and matched_row[3] != system:
+                            resolution = ResolutionState.NOT_FOUND
+                        else:
+                            resolution = ResolutionState.READY if best_confidence >= policy.fuzzy_min_confidence else ResolutionState.REVIEW_REQUIRED
+                        file_id = best_file_id
+                        method = best_method
+                        confidence = best_confidence
+                    else:
+                        resolution = ResolutionState.NOT_FOUND
+                        file_id = None
+                        method = None
+                        confidence = None
+
+                    if resolution == ResolutionState.REVIEW_REQUIRED:
+                        romresolve_id = self._try_romresolve(dat_entry, scope)
+                        if romresolve_id is not None:
+                            resolution = ResolutionState.READY
+                            file_id = romresolve_id
+                            method = "romresolve"
+                            confidence = 1.0
+
+                    if resolution == ResolutionState.READY:
+                        decision = "accept"
+                    elif resolution == ResolutionState.REVIEW_REQUIRED:
+                        decision = "pending"
+                    else:
+                        decision = "reject"
+
+                    if resolution == ResolutionState.READY:
+                        counts = AcquisitionSummary(
+                            ready=counts.ready + 1,
+                            review_required=counts.review_required,
+                            not_found=counts.not_found,
+                            ignored=counts.ignored,
+                        )
+                    elif resolution == ResolutionState.REVIEW_REQUIRED:
+                        counts = AcquisitionSummary(
+                            ready=counts.ready,
+                            review_required=counts.review_required + 1,
+                            not_found=counts.not_found,
+                            ignored=counts.ignored,
+                        )
+                    elif resolution == ResolutionState.NOT_FOUND:
+                        counts = AcquisitionSummary(
+                            ready=counts.ready,
+                            review_required=counts.review_required,
+                            not_found=counts.not_found + 1,
+                            ignored=counts.ignored,
+                        )
+
                     entries.append(ReviewEntry(
                         id=f"{report_id}_{ordinal}",
                         report_id=report_id,
                         ordinal=ordinal,
                         filename=dat_entry.filename,
                         size=dat_entry.size,
-                        automatic_file_id=None,
-                        automatic_method=None,
-                        automatic_confidence=None,
-                        resolution=ResolutionState.NOT_FOUND,
-                        decision="reject",
+                        automatic_file_id=file_id,
+                        automatic_method=method,
+                        automatic_confidence=confidence,
+                        resolution=resolution,
+                        decision=decision,
                     ))
-                    counts = AcquisitionSummary(
-                        ready=counts.ready,
-                        review_required=counts.review_required,
-                        not_found=counts.not_found + 1,
-                        ignored=counts.ignored,
-                    )
-                unmatched_ordinals = capped
-            for ordinal in unmatched_ordinals:
-                dat_entry = dat_entries[ordinal]
-                resolution, file_id, method, confidence = self._classify(
-                    dat_entry, scope, policy, conn=_batch_conn,
-                )
-
-                if resolution == ResolutionState.REVIEW_REQUIRED:
-                    romresolve_id = self._try_romresolve(dat_entry, scope)
-                    if romresolve_id is not None:
-                        resolution = ResolutionState.READY
-                        file_id = romresolve_id
-                        method = "romresolve"
-                        confidence = 1.0
-
-                if resolution == ResolutionState.READY:
-                    decision = "accept"
-                elif resolution == ResolutionState.REVIEW_REQUIRED:
-                    decision = "pending"
-                else:
-                    decision = "reject"
-
-                if resolution == ResolutionState.READY:
-                    counts = AcquisitionSummary(
-                        ready=counts.ready + 1,
-                        review_required=counts.review_required,
-                        not_found=counts.not_found,
-                        ignored=counts.ignored,
-                    )
-                elif resolution == ResolutionState.REVIEW_REQUIRED:
-                    counts = AcquisitionSummary(
-                        ready=counts.ready,
-                        review_required=counts.review_required + 1,
-                        not_found=counts.not_found,
-                        ignored=counts.ignored,
-                    )
-                elif resolution == ResolutionState.NOT_FOUND:
-                    counts = AcquisitionSummary(
-                        ready=counts.ready,
-                        review_required=counts.review_required,
-                        not_found=counts.not_found + 1,
-                        ignored=counts.ignored,
-                    )
-
-                entries.append(ReviewEntry(
-                    id=f"{report_id}_{ordinal}",
-                    report_id=report_id,
-                    ordinal=ordinal,
-                    filename=dat_entry.filename,
-                    size=dat_entry.size,
-                    automatic_file_id=file_id,
-                    automatic_method=method,
-                    automatic_confidence=confidence,
-                    resolution=resolution,
-                    decision=decision,
-                ))
         finally:
             _batch_conn.close()
 
