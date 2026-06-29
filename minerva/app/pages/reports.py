@@ -29,7 +29,7 @@ from minerva.ui.widgets.property_list import PropertyList
 from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
 from minerva.app.task_runner import TaskRunner
 from minerva.services.report_acquisition import ReportAcquisitionService, romm_destination
-from minerva.domain.reports import ReportSummary, ReviewEntry
+from minerva.domain.reports import QueueResult, ReportSummary, ReviewEntry
 from minerva.ui.icons import Icons
 from minerva.ui.models.delegates import DisplayDelegate, SizeDelegate
 from minerva.ui.models.record_model import ColumnSpec, RecordListModel
@@ -229,6 +229,7 @@ class ReportsPage(BasePage):
         self._pool = QtCore.QThreadPool.globalInstance()
         self._generation = 0
         self._selected_report_id: str | None = None
+        self._selected_report_ids: set[str] = set()  # multi-selection → batch toolbar
         self._updating = False  # ponytail: guard for signal recursion
 
         self._entry_model = RecordListModel([], _ENTRY_COLUMNS, self)
@@ -245,13 +246,25 @@ class ReportsPage(BasePage):
         self._rematch_btn = self._header.add_action("Match again", Icons.refresh())
         self._queue_all_btn = self._header.add_action("Queue all ready", Icons.download())
         self._delete_btn = self._header.add_action("Remove", Icons.trash(), danger=True)
+        # ── Batch actions (multi-select) ───────────────────────────────
+        self._queue_selected_btn = self._header.add_action("Queue selected", Icons.download())
+        self._rematch_selected_btn = self._header.add_action("Match selected", Icons.refresh())
+        self._export_selected_btn = self._header.add_action("Export selected", Icons.file())
+        self._delete_selected_btn = self._header.add_action("Remove selected", Icons.trash(), danger=True)
         self._rematch_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
         self._queue_all_btn.setEnabled(False)
+        for _btn in (self._queue_selected_btn, self._rematch_selected_btn,
+                     self._export_selected_btn, self._delete_selected_btn):
+            _btn.setEnabled(False)
         self._import_btn.clicked.connect(self._on_import)
         self._rematch_btn.clicked.connect(self._rematch_selected)
         self._queue_all_btn.clicked.connect(self._queue_all_ready)
         self._delete_btn.clicked.connect(self._delete_selected)
+        self._queue_selected_btn.clicked.connect(self._queue_selected)
+        self._rematch_selected_btn.clicked.connect(self._rematch_selected_set)
+        self._export_selected_btn.clicked.connect(self._export_selected_set)
+        self._delete_selected_btn.clicked.connect(self._delete_selected_set)
 
         # ── KPI strip ──────────────────────────────────────────────────
         self._card_requested = MetricCard(
@@ -280,6 +293,7 @@ class ReportsPage(BasePage):
         self._navigator.current_report_changed.connect(self._on_report_selected)
         self._navigator.report_activated.connect(lambda _report: self._review_selected())
         self._navigator.context_menu_requested.connect(self._show_report_menu)
+        self._navigator.selection_changed.connect(self._on_report_selection_changed)
 
         # ── Center panel: SurfacePanel with search + filters + table ───
         self._surface_panel = SurfacePanel("Reports")
@@ -840,6 +854,169 @@ class ReportsPage(BasePage):
     def _selected_report(self) -> ReportSummary | None:
         return self._navigator.current_report()
 
+    def _build_acquisition_service(self) -> ReportAcquisitionService:
+        """Construct the service with the current controller + output dir."""
+        controller = getattr(self.window(), "download_controller", None)
+        output_dir = QtCore.QSettings("MinervaFixDAT", "MinervaGUI").value(
+            "output_dir", "downloads", str,
+        )
+        return ReportAcquisitionService(
+            state=self._app_state.reports._state,
+            download_controller=controller,
+            output_dir=output_dir,
+        )
+
+    def _on_report_selection_changed(self, reports: list[ReportSummary]) -> None:
+        """Multi-selection set changed — enable/disable batch buttons."""
+        self._selected_report_ids = {r.id for r in reports}
+        has_selection = bool(self._selected_report_ids)
+        for btn in (self._queue_selected_btn, self._rematch_selected_btn,
+                    self._export_selected_btn, self._delete_selected_btn):
+            btn.setEnabled(has_selection)
+
+    # ── Batch actions over multi-selection ──────────────────────────────
+
+    def _queue_selected(self) -> None:
+        """Queue ready+approved entries across all selected reports."""
+        ids = sorted(self._selected_report_ids)
+        if not ids:
+            return
+        try:
+            controller = getattr(self.window(), "download_controller", None)
+            if controller is None:
+                NotificationBanner.show_error(
+                    self, "Queue failed", "The qBittorrent controller is not initialised",
+                )
+                return
+            controller.reconcile()
+            svc = self._build_acquisition_service()
+            results = [svc.queue_ready(rid, include_reviewed=True) for rid in ids]
+            total = QueueResult.merge(*results)
+            log.info("batch queue (%d reports): added=%d, skipped_active=%d, "
+                     "skipped_complete=%d, skipped_missing=%d",
+                     len(ids), total.added, total.skipped_active,
+                     total.skipped_complete, total.skipped_missing)
+            if total.added == 0:
+                NotificationBanner.show_warning(
+                    self, "Nothing queued",
+                    f"Across {len(ids)} reports: {total.skipped_active} active, "
+                    f"{total.skipped_complete} complete, {total.skipped_missing} missing.",
+                )
+            else:
+                NotificationBanner.show_success(
+                    self, "Queue updated",
+                    f"Queued {total.added} ROMs from {len(ids)} reports "
+                    f"({total.skipped_active} active, {total.skipped_missing} missing).",
+                )
+        except Exception as exc:
+            log.error("_queue_selected failed", exc_info=True)
+            NotificationBanner.show_error(self, "Queue failed", str(exc))
+
+    def _rematch_selected_set(self) -> None:
+        """Re-run matching across all selected reports (background)."""
+        ids = sorted(self._selected_report_ids)
+        if not ids:
+            return
+        self._set_state(ReportsPageState.LOADING)
+        self._generation += 1
+        gen = self._generation
+        task = TaskRunner.wrap_result(self._rematch_set_worker, ids)
+        task.signals.result.connect(lambda payload: self._on_batch_rematch_result(gen, payload))
+        task.signals.error.connect(lambda details: self._on_match_error(gen, "", details))
+        self._pool.start(task)
+
+    def _rematch_set_worker(self, ids: list[str]) -> dict:
+        """Runs in worker thread. Best-effort per report."""
+        svc = ReportAcquisitionService(state=self._app_state.reports._state)
+        succeeded: list[str] = []
+        failed: list[str] = []
+        for rid in ids:
+            try:
+                svc.rematch_report(rid)
+                succeeded.append(rid)
+            except Exception as exc:
+                log.warning("batch rematch failed for %s: %s", rid[:8], exc)
+                failed.append(rid)
+        return {"succeeded": succeeded, "failed": failed}
+
+    def _on_batch_rematch_result(self, generation: int, payload) -> None:
+        if generation != self._generation:
+            return
+        from minerva.ui.result import OperationResult
+        data = payload.payload if isinstance(payload, OperationResult) else payload
+        self.refresh()
+        failed = len(data.get("failed", [])) if isinstance(data, dict) else 0
+        succeeded = len(data.get("succeeded", [])) if isinstance(data, dict) else 0
+        if failed:
+            NotificationBanner.show_warning(
+                self, "Match complete",
+                f"Matched {succeeded} report(s), {failed} failed",
+            )
+        else:
+            NotificationBanner.show_success(
+                self, "Matched", f"Matched {succeeded} report(s)",
+            )
+
+    def _export_selected_set(self) -> None:
+        """Export a reviewed DAT per selected report into a chosen folder."""
+        ids = sorted(self._selected_report_ids)
+        if not ids:
+            return
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Export reviewed DATs to folder")
+        if not folder:
+            return
+        try:
+            svc = self._build_acquisition_service()
+            written = 0
+            for rid in ids:
+                report = self._app_state.reports.get_report(rid)
+                if report is None:
+                    continue
+                dest = Path(folder) / f"{report.name}-reviewed.dat"
+                try:
+                    count = svc.export_reviewed(rid, dest)
+                    if count:
+                        written += 1
+                except Exception as exc:
+                    log.warning("batch export failed for %s: %s", rid[:8], exc)
+            if written == 0:
+                NotificationBanner.show_warning(
+                    self, "Nothing exported", "No approved entries across selected reports",
+                )
+            else:
+                NotificationBanner.show_success(
+                    self, "DATs exported", f"{written} files written to {folder}",
+                )
+        except Exception as exc:
+            log.error("_export_selected_set failed", exc_info=True)
+            NotificationBanner.show_error(self, "Export failed", str(exc))
+
+    def _delete_selected_set(self) -> None:
+        """Delete all selected reports after confirmation."""
+        ids = sorted(self._selected_report_ids)
+        if not ids:
+            return
+        if QtWidgets.QMessageBox.question(
+            self, "Remove reports",
+            f"Remove {len(ids)} report(s) and their review decisions?",
+        ) != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        failed = 0
+        for rid in ids:
+            try:
+                self._app_state.reports.delete_report(rid)
+            except Exception as exc:
+                log.error("delete_report %s failed", rid[:8], exc_info=True)
+                failed += 1
+        self._selected_report_ids.clear()
+        if self._selected_report_id in ids:
+            self._selected_report_id = None
+        self.refresh()
+        if failed:
+            NotificationBanner.show_warning(
+                self, "Partial delete", f"{failed} of {len(ids)} reports could not be removed",
+            )
+
     def _rematch_selected(self) -> None:
         report = self._selected_report()
         if report is None:
@@ -976,28 +1153,21 @@ class ReportsPage(BasePage):
         report = self._selected_report()
         if report is None:
             return
-        entries = MinervaState().get_entries(report.id)
-        ids = [
-            entry.selected_file_id or entry.automatic_file_id
-            for entry in entries
-            if entry.decision in {"accept", "fuzzy"}
-            and (entry.selected_file_id or entry.automatic_file_id)
-        ]
-        items = MinervaDB().get_files_by_ids(ids)
-        if not items:
-            NotificationBanner.show_warning(self, "Nothing approved", "Review and approve matches first")
-            return
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Export reviewed DAT", f"{report.name}-reviewed.dat", "DAT files (*.dat)",
         )
         if not path:
             return
-        rows = [{"stem": item.stem, "basename": item.basename, "size": item.size} for item in items]
-        Path(path).write_text(
-            MinervaDB().build_synthetic_dat(rows, f"{report.name} reviewed", report.system, report.collection),
-            encoding="utf-8",
-        )
-        NotificationBanner.show_success(self, "DAT exported", path)
+        try:
+            svc = self._build_acquisition_service()
+            count = svc.export_reviewed(report.id, Path(path))
+            if count == 0:
+                NotificationBanner.show_warning(self, "Nothing approved", "Review and approve matches first")
+            else:
+                NotificationBanner.show_success(self, "DAT exported", f"{path} ({count} entries)")
+        except Exception as exc:
+            log.error("_export_reviewed failed", exc_info=True)
+            NotificationBanner.show_error(self, "Export failed", str(exc))
 
     def _open_source_folder(self) -> None:
         report = self._selected_report()
@@ -1029,6 +1199,21 @@ class ReportsPage(BasePage):
         reveal = menu.addAction(Icons.folder_open(), "Open source folder")
         menu.addSeparator()
         remove = menu.addAction(Icons.trash(), "Remove report")
+
+        # ── Batch submenu (only when >1 report selected) ───────────────
+        batch_actions: dict[QtGui.QAction, str] = {}
+        selected = self._navigator.selected_reports()
+        selected_ids = {r.id for r in selected}
+        if report.id not in selected_ids:
+            selected_ids = {report.id}
+        if len(selected_ids) > 1:
+            batch = menu.addMenu(Icons.queue(), f"Apply to {len(selected_ids)} selected")
+            batch_actions[batch.addAction(Icons.download(), "Queue selected")] = "queue"
+            batch_actions[batch.addAction(Icons.refresh(), "Match selected")] = "rematch"
+            batch_actions[batch.addAction(Icons.file(), "Export selected")] = "export"
+            menu.addSeparator()
+            batch_actions[menu.addAction(Icons.trash(), "Remove selected")] = "remove"
+
         chosen = menu.exec(global_pos)
         if chosen == queue:
             self._queue_report(report.id)
@@ -1042,6 +1227,16 @@ class ReportsPage(BasePage):
             self._open_source_folder()
         elif chosen == remove:
             self._delete_selected()
+        elif chosen in batch_actions:
+            action = batch_actions[chosen]
+            if action == "queue":
+                self._queue_selected()
+            elif action == "rematch":
+                self._rematch_selected_set()
+            elif action == "export":
+                self._export_selected_set()
+            elif action == "remove":
+                self._delete_selected_set()
 
     def handle_drop(self, event: QtGui.QDropEvent) -> None:
         paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
