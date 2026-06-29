@@ -18,7 +18,6 @@ from pathlib import Path
 from minerva_db import DEFAULT_INDEX_PATH, DEFAULT_TORRENT_DIR, MinervaDB, build_index
 from minerva_qbit import QBittorrentClient
 
-
 # ── Formatting helpers ────────────────────────────────────────────────────────
 
 def _format_bytes(n: int) -> str:
@@ -95,6 +94,72 @@ def command_check(args: argparse.Namespace) -> None:
     print(f"Integrity: {result.get('quick_check', 'unknown')}")
 
 
+# ── Batch commands ────────────────────────────────────────────────────────────
+
+def _build_batch_service(output_dir: str | Path = "downloads"):
+    """Construct a headless ReportAcquisitionService (no Qt, no controller).
+
+    _enqueue_file falls back to writing queue records directly to
+    MinervaState so the GUI picks them up later.
+    """
+    from minerva.services.report_acquisition import ReportAcquisitionService
+    from minerva_state import MinervaState
+    state = MinervaState()
+    return ReportAcquisitionService(state=state, download_controller=None, output_dir=output_dir)
+
+
+def command_batch_import(args: argparse.Namespace) -> None:
+    """Recursively import + match every fixdat file under a directory."""
+    from minerva.services.report_acquisition import ReportAcquisitionService
+    root = Path(args.directory)
+    if not root.is_dir():
+        print(f"Not a directory: {root}")
+        sys.exit(1)
+    svc = _build_batch_service()
+    summary = ReportAcquisitionService.import_folder(svc, root)
+    print(f"Imported {summary.imported}, skipped {summary.skipped}, failed {summary.failed}")
+
+
+def command_batch_queue(args: argparse.Namespace) -> None:
+    """Queue ready entries across all (or filtered) reports."""
+    svc = _build_batch_service(output_dir=args.output_dir)
+    result = svc.queue_all_ready(
+        name_filter=args.filter or "",
+        include_reviewed=not args.no_reviewed,
+    )
+    print(f"Queued {result.added} ROMs "
+          f"(skipped: {result.skipped_active} active, "
+          f"{result.skipped_complete} complete, "
+          f"{result.skipped_missing} missing)")
+
+
+def command_batch_rematch(args: argparse.Namespace) -> None:
+    """Re-run matching for each listed report_id."""
+    svc = _build_batch_service()
+    succeeded = failed = 0
+    for rid in args.report_ids:
+        try:
+            svc.rematch_report(rid)
+            succeeded += 1
+        except Exception as exc:
+            print(f"  failed {rid[:8]}: {exc}")
+            failed += 1
+    print(f"Rematched {succeeded} report(s), {failed} failed")
+
+
+def command_batch_list(args: argparse.Namespace) -> None:
+    """List imported reports with status."""
+    svc = _build_batch_service()
+    reports = svc._state.list_reports()
+    if not reports:
+        print("No reports imported.")
+        return
+    print(f"{'NAME':30s} {'STATUS':10s} {'COLLECTION':15s} {'SYSTEM':30s}")
+    print("-" * 85)
+    for r in reports:
+        print(f"{r.name[:30]:30s} {r.status[:10]:10s} "
+              f"{(r.collection or '')[:15]:15s} {(r.system or '')[:30]:30s}")
+    print(f"\n{len(reports)} report(s)")
 # ── CLI entrypoint ────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -117,6 +182,19 @@ def main() -> None:
     sub.add_parser("stats", help="Index statistics")
     sub.add_parser("check", help="Integrity check")
 
+    p_bi = sub.add_parser("batch-import", help="Import fixdat files from a folder")
+    p_bi.add_argument("directory")
+
+    p_bq = sub.add_parser("batch-queue", help="Queue ready entries from all reports")
+    p_bq.add_argument("--filter", default="", help="Filter reports by name substring")
+    p_bq.add_argument("--no-reviewed", action="store_true", help="Exclude reviewed entries")
+    p_bq.add_argument("--output-dir", default="downloads", help="Destination root")
+
+    p_br = sub.add_parser("batch-rematch", help="Re-run matching for reports")
+    p_br.add_argument("report_ids", nargs="+")
+
+    sub.add_parser("batch-list", help="List imported reports")
+
     args = parser.parse_args()
 
     commands = {
@@ -125,6 +203,10 @@ def main() -> None:
         "download": command_download,
         "stats": command_stats,
         "check": command_check,
+        "batch-import": command_batch_import,
+        "batch-queue": command_batch_queue,
+        "batch-rematch": command_batch_rematch,
+        "batch-list": command_batch_list,
     }
 
     cmd = commands.get(args.command)
