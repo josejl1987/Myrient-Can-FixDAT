@@ -19,8 +19,9 @@ from minerva.domain.reports import (
     AcquisitionConstraints,
     AcquisitionPlan,
     AcquisitionSummary,
-    MatchPolicy,
+    EmptyReportError,
     FolderImportSummary,
+    MatchPolicy,
     QueueResult,
     ReportOutcome,
     ReportScope,
@@ -1056,7 +1057,7 @@ class ReportAcquisitionService:
             else parse_dat_file(path)
         )
         if not info.entries:
-            raise ValueError(f"Empty report: {path}")
+            raise EmptyReportError(path)
 
         # Resolve scope — infer_scope returns ReportScope (never None)
         resolved_scope: ReportScope = scope if scope is not None else self.infer_scope(path)
@@ -1127,6 +1128,10 @@ class ReportAcquisitionService:
                 report = service.import_report(path)
             except ScopeInferenceRequired:
                 log.info("import_folder: skip %s (scope ambiguous)", path)
+                skipped += 1
+                continue
+            except EmptyReportError:
+                log.info("import_folder: skip %s (empty)", path)
                 skipped += 1
                 continue
             except Exception as exc:

@@ -383,15 +383,17 @@ class ReportNavigator(QtWidgets.QFrame):
 
     def current_report(self) -> ReportSummary | None:
         proxy_index = self.view.currentIndex()
-        if not proxy_index.isValid():
+        if not proxy_index.isValid() or proxy_index.model() is not self.proxy:
             return None
         source = self.proxy.mapToSource(proxy_index)
-        return self.model.report_at(source.row())
+        return self.model.report_at(source.row()) if source.isValid() else None
 
     def selected_reports(self) -> list[ReportSummary]:
         """All reports under the current multi-selection (filtered by proxy)."""
         reports: list[ReportSummary] = []
         for proxy_index in self.view.selectionModel().selectedIndexes():
+            if not proxy_index.isValid() or proxy_index.model() is not self.proxy:
+                continue
             source = self.proxy.mapToSource(proxy_index)
             report = self.model.report_at(source.row())
             if report is not None and report not in reports:
@@ -400,8 +402,11 @@ class ReportNavigator(QtWidgets.QFrame):
 
     def _on_current_changed(self, current: QtCore.QModelIndex, _previous: QtCore.QModelIndex) -> None:
         """Focus moved — drives the entry table + MatchDetailPanel review flow."""
-        source = self.proxy.mapToSource(current) if current.isValid() else None
-        report = self.model.report_at(source.row()) if source and source.isValid() else None
+        if not current.isValid() or current.model() is not self.proxy:
+            self.current_report_changed.emit(None)
+            return
+        source = self.proxy.mapToSource(current)
+        report = self.model.report_at(source.row()) if source.isValid() else None
         self.current_report_changed.emit(report)
 
     def _on_selection_set_changed(self, _selected, _deselected) -> None:
@@ -409,17 +414,21 @@ class ReportNavigator(QtWidgets.QFrame):
         self.selection_changed.emit(self.selected_reports())
 
     def _on_activated(self, index: QtCore.QModelIndex) -> None:
+        if not index.isValid() or index.model() is not self.proxy:
+            return
         source = self.proxy.mapToSource(index)
-        self.report_activated.emit(self.model.report_at(source.row()))
+        if source.isValid():
+            self.report_activated.emit(self.model.report_at(source.row()))
 
     def _on_context_menu(self, pos: QtCore.QPoint) -> None:
         index = self.view.indexAt(pos)
-        if not index.isValid():
+        if not index.isValid() or index.model() is not self.proxy:
             return
         source = self.proxy.mapToSource(index)
-        report = self.model.report_at(source.row())
-        if report is not None:
-            self.context_menu_requested.emit(report, self.view.viewport().mapToGlobal(pos))
+        if source.isValid():
+            report = self.model.report_at(source.row())
+            if report is not None:
+                self.context_menu_requested.emit(report, self.view.viewport().mapToGlobal(pos))
 
     def apply_tokens(self, tokens: ThemeTokens) -> None:
         self.delegate.apply_tokens(tokens)

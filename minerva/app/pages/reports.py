@@ -1236,7 +1236,8 @@ class ReportsPage(BasePage):
     def _show_report_menu(self, report: ReportSummary, global_pos: QtCore.QPoint) -> None:
         row = self._navigator.model.index_of(report.id)
         if row >= 0:
-            self._navigator.view.setCurrentIndex(self._navigator.model.index(row, 0))
+            proxy_row = self._navigator._find_proxy_row(report.id)
+            self._navigator.view.setCurrentIndex(self._navigator.proxy.index(proxy_row, 0))
         self._selected_report_id = report.id
         menu = QtWidgets.QMenu(self)
         queue = menu.addAction(Icons.download(), "Queue report")

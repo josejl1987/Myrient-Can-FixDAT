@@ -108,3 +108,30 @@ def test_import_folder_continues_after_failure(tmp_path):
     summary = ReportAcquisitionService.import_folder(svc, root)
     assert summary.imported == 1
     assert summary.failed == 1
+
+
+def test_import_folder_skips_empty_reports(tmp_path):
+    """Empty DATs (EmptyReportError) should be skipped, not failed."""
+    from minerva.domain.reports import EmptyReportError
+
+    root = tmp_path / "datset"
+    root.mkdir()
+    _write_fake_dat(root / "good.dat", "Good", 1)
+    (root / "empty.dat").write_text('<?xml?><dataframe name="Empty"></dataframe>')
+
+    def fake_import(path):
+        if path.name == "empty.dat":
+            raise EmptyReportError(path)
+        return ReportSummary(
+            id=path.stem, path=str(path), name=path.stem, collection="",
+            system="", imported_at=datetime.now(timezone.utc).isoformat(),
+            requested_count=1, status="draft")
+
+    svc = MagicMock(spec=ReportAcquisitionService)
+    svc.import_report.side_effect = fake_import
+    svc.match_report.return_value = None
+
+    summary = ReportAcquisitionService.import_folder(svc, root)
+    assert summary.imported == 1
+    assert summary.skipped == 1
+    assert summary.failed == 0

@@ -112,6 +112,18 @@ class ScopeInferenceRequired(Exception):
         super().__init__(f"Could not infer report scope from {len(candidates)} candidates")
 
 
+class EmptyReportError(ValueError):
+    """Raised when a report file contains no entries.
+
+    Subclasses ValueError so existing ``except ValueError`` callers still
+    work, but lets ``import_folder`` distinguish empty reports (skip)
+    from genuine parse errors (fail) without string inspection.
+    """
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"Empty report: {path}")
+
+
 class ReportOutcome(str, enum.Enum):
     """Outcome of the triage eligibility check for a report."""
 
