@@ -1427,6 +1427,32 @@ class ReportAcquisitionService:
                     unmatched_ordinals.append(ordinal)
 
             # ── Slow path: per-entry FTS/trigram for unmatched entries ───
+            # Cap at 200 entries through the slow path. If more remain,
+            # mark them NOT_FOUND — the user can rematch individually.
+            SLOW_PATH_LIMIT = 200
+            if len(unmatched_ordinals) > SLOW_PATH_LIMIT:
+                capped, overflow = unmatched_ordinals[:SLOW_PATH_LIMIT], unmatched_ordinals[SLOW_PATH_LIMIT:]
+                for ordinal in overflow:
+                    dat_entry = dat_entries[ordinal]
+                    entries.append(ReviewEntry(
+                        id=f"{report_id}_{ordinal}",
+                        report_id=report_id,
+                        ordinal=ordinal,
+                        filename=dat_entry.filename,
+                        size=dat_entry.size,
+                        automatic_file_id=None,
+                        automatic_method=None,
+                        automatic_confidence=None,
+                        resolution=ResolutionState.NOT_FOUND,
+                        decision="reject",
+                    ))
+                    counts = AcquisitionSummary(
+                        ready=counts.ready,
+                        review_required=counts.review_required,
+                        not_found=counts.not_found + 1,
+                        ignored=counts.ignored,
+                    )
+                unmatched_ordinals = capped
             for ordinal in unmatched_ordinals:
                 dat_entry = dat_entries[ordinal]
                 resolution, file_id, method, confidence = self._classify(
