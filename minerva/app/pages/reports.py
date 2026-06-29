@@ -463,7 +463,7 @@ class ReportsPage(BasePage):
         content_layout.addWidget(self._workspace, 1)
         return content
 
-    def activate(self) -> None:
+    def activate(self, view_state: object = None) -> None:
         self.refresh()
         self._wire_signals()
         self._wire_shortcuts()
