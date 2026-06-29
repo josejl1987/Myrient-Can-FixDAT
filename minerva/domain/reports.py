@@ -9,7 +9,7 @@ a per-entry review workflow.
 from __future__ import annotations
 
 import enum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -75,6 +75,19 @@ class QueueResult:
     skipped_complete: int # already completed
     skipped_missing: int  # not_found entries skipped
 
+    @classmethod
+    def merge(cls, *results: "QueueResult") -> "QueueResult":
+        """Sum field-wise across multiple results. Empty call → zero result.
+
+        Used by UI/CLI batch operations to aggregate per-report results
+        uniformly. Replaces ad-hoc manual aggregation loops.
+        """
+        return cls(
+            added=sum(r.added for r in results),
+            skipped_active=sum(r.skipped_active for r in results),
+            skipped_complete=sum(r.skipped_complete for r in results),
+            skipped_missing=sum(r.skipped_missing for r in results),
+        )
 
 @dataclass(frozen=True)
 class ReportScope:
@@ -88,7 +101,7 @@ class ScopeInferenceRequired(Exception):
     Carries candidate (collection, system) pairs so the UI can prompt.
     """
 
-    def __init__(self, candidates: list[tuple[str, str, int]]) -> None:
+    def __init__(self, candidates: list[tuple[str | None, str | None, int]]) -> None:
         self.candidates = candidates
         super().__init__(f"Could not infer report scope from {len(candidates)} candidates")
 

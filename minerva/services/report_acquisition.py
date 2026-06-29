@@ -11,17 +11,15 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from minerva.domain.downloads import DownloadControllerProtocol
 from minerva.domain.reports import (
+    AcquisitionConstraints,
     AcquisitionPlan,
     AcquisitionSummary,
     MatchPolicy,
-    PlannedFile,
     QueueResult,
     ReportOutcome,
     ReportScope,
@@ -33,10 +31,8 @@ from minerva.domain.reports import (
 from minerva_db import (
     DatEntry,
     MinervaDB,
-    StemSizeMatch,
     parse_dat_file,
     parse_rv_fix_csv,
-    stem_from_romname,
 )
 from minerva_state import MinervaState
 
@@ -948,8 +944,9 @@ class ReportAcquisitionService:
         # Try relative to the romresolve package
         try:
             mod = importlib.import_module("romresolve")
-            pkg_root = Path(mod.__file__).resolve().parent.parent.parent
-            candidates.append(pkg_root / "examples" / "policy.translated-en.yaml")
+            if mod.__file__:
+                pkg_root = Path(mod.__file__).resolve().parent.parent.parent
+                candidates.append(pkg_root / "examples" / "policy.translated-en.yaml")
         except Exception:
             log.debug("_auto_load_romresolve_policy: romresolve package not found")
 
@@ -1060,10 +1057,8 @@ class ReportAcquisitionService:
         if not info.entries:
             raise ValueError(f"Empty report: {path}")
 
-        # Resolve scope
-        resolved_scope = scope
-        if resolved_scope is None:
-            resolved_scope = self.infer_scope(path)
+        # Resolve scope — infer_scope returns ReportScope (never None)
+        resolved_scope: ReportScope = scope if scope is not None else self.infer_scope(path)
 
         existing = self._state.get_report_by_path(path)
         report_id = existing.id if existing else uuid.uuid4().hex
@@ -1072,8 +1067,8 @@ class ReportAcquisitionService:
             id=report_id,
             path=str(path),
             name=info.name or path.stem,
-            collection=resolved_scope.collection if resolved_scope else info.collection,
-            system=resolved_scope.system if resolved_scope else info.system,
+            collection=resolved_scope.collection or info.collection,
+            system=resolved_scope.system or info.system,
             imported_at=datetime.now(timezone.utc).isoformat(),
             requested_count=len(info.entries),
             status="draft",
@@ -1108,7 +1103,7 @@ class ReportAcquisitionService:
     def _classify(
         self,
         entry: DatEntry,
-        scope: ReportScope | None,
+        scope: ReportScope,
         policy: MatchPolicy,
     ) -> tuple[ResolutionState, int | None, str | None, float | None]:
         """Classify a single entry using margin-based classification.
@@ -1536,7 +1531,6 @@ class ReportAcquisitionService:
 
     def _all_already_present(self, report_id: str) -> bool:
         """Check if every entry in the report is already completed."""
-        from minerva_db import MinervaDB
 
         entries = self._state.get_entries(report_id)
         if not entries:
@@ -1561,8 +1555,6 @@ class ReportAcquisitionService:
         filters or scope inference at queue time. Routes through the
         download controller when one is available.
         """
-        from minerva.domain.downloads import QueueRecord
-        from datetime import datetime, timezone
 
         queue_records = self._state.list_queue()
         active_file_ids: set[int] = set()
@@ -1619,15 +1611,8 @@ class ReportAcquisitionService:
         reports = self._state.list_reports()
         if name_filter:
             reports = [r for r in reports if name_filter in r.name]
-        total = QueueResult(
-            added=0, skipped_active=0, skipped_complete=0, skipped_missing=0,
-        )
-        for r in reports:
-            sub = self.queue_ready(r.id, include_reviewed=include_reviewed)
-            total = QueueResult(
-                added=total.added + sub.added,
-                skipped_active=total.skipped_active + sub.skipped_active,
-                skipped_complete=total.skipped_complete + sub.skipped_complete,
-                skipped_missing=total.skipped_missing + sub.skipped_missing,
-            )
-        return total
+        sub_results = [
+            self.queue_ready(r.id, include_reviewed=include_reviewed)
+            for r in reports
+        ]
+        return QueueResult.merge(*sub_results)
