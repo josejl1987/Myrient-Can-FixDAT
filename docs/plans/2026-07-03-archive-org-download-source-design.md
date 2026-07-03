@@ -120,33 +120,53 @@ candidates, tagged with source.
 
 **New file:** `minerva/services/archive_org.py`
 
-Wraps archive.org's advanced search API
-(`archive.org/advancedsearch.php`). Two-phase search:
+Uses the official `internetarchive` Python library (v5.10.1, added as a
+project dependency via `uv add internetarchive`). The library wraps
+archive.org's three HTTP APIs (advancedsearch.php, scrape API, metadata
+API) and handles URL encoding, pagination, and retries internally.
 
-**Phase 1 — item search:**
-```
-GET https://archive.org/advancedsearch.php
-  ?q=title:"Tetris DX" AND mediatype:(software)
-  &fl[]=identifier&fl[]=title&fl[]=collection&fl[]=downloads
-  &rows=20&output=json
+**Phase 1 — item search** via `search_items`:
+```python
+from internetarchive import search_items
+
+# Lucene syntax: title, collection, mediatype, format filters
+results = search_items(
+    f'title:"{entry_title}" AND mediatype:data',
+    fields=["identifier", "title", "collection", "downloads"],
+)
+for r in results:
+    identifier = r["identifier"]
+    title = r.get("title", "")
 ```
 
-**Phase 2 — file metadata:** For each promising identifier, fetch
-`https://archive.org/metadata/<identifier>` to get the file list. Filter
-files by extension (ROM types: `.zip`, `.7z`, `.rom`, `.bin`, `.nes`,
-`.sfc`, `.gb`, `.gbc`, `.gba`, `.nds`, `.iso`, etc.). Apply the same
-normalization pipeline (`stem_from_romname`) to score archive.org file
-names against the DAT entry.
+**Phase 2 — file metadata** via `get_item`:
+```python
+from internetarchive import get_item
+
+item = get_item(identifier)
+rom_files = [
+    f for f in item.files
+    if _is_rom_file(f["name"])  # .zip, .7z, .chd, .iso, .nes, .gb, etc.
+]
+# Each file dict: name, size, format, md5, crc32, sha1, source
+# Download URL: https://archive.org/download/<identifier>/<filename>
+```
+
+Apply the same normalization pipeline (`stem_from_romname`) to score
+archive.org file names against the DAT entry.
 
 **Collection boosting:** Known preservation collections get a confidence
 boost:
 - `no-intro`, `no_intro` → +0.05
 - `redump` → +0.05
+- `*-chd-zstd-redump` → +0.05
 - `softwarelibrary_*` → +0.02
 
-**Torrent detection:** The metadata response includes file entries; any
-file ending in `_archive.torrent` indicates torrent availability. The
-item's `downloads` count serves as a seeders proxy.
+**Torrent detection:** Check the item's file list for `*_archive.torrent`
+entries. Archive.org generates these for some items but not all (verified:
+psx-ntsc-chd-zstd has 0 torrent files). When no torrent is available,
+the candidate is tagged `ARCHIVE_ORG_HTTP`. The item's `downloads` count
+serves as a popularity proxy.
 
 **Caching:** LRU cache with 5-minute TTL per query (reuse the existing
 `minerva_db.LRUCache` pattern). Identifiers cached independently.
@@ -284,8 +304,9 @@ before enqueuing.
 ## Testing
 
 - **Unit (no Qt):**
-  - `ArchiveOrgSearchClient` with mocked HTTP responses (fixture JSON
-    from real archive.org API responses).
+  - `ArchiveOrgSearchClient` with mocked `internetarchive` calls (fixture
+    JSON from real archive.org API responses — `search_items` and
+    `get_item` monkeypatched).
   - `ArchiveOrgCandidateProvider` scoring: title normalization, collection
     boost, torrent-vs-HTTP source assignment.
   - Schema migration: add columns on existing v3 DB (test with a DB
