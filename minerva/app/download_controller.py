@@ -6,15 +6,14 @@ import logging
 import os
 import shutil
 import threading
-import requests
 import time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
+import requests
 from PyQt6 import QtCore
 
 from minerva.app.app_state import AppState
@@ -24,7 +23,6 @@ from minerva.domain.downloads import (
     DOWNLOAD_DEAD_STATUSES,
     DOWNLOAD_DONE_STATUSES,
     DOWNLOAD_IN_PROGRESS_STATUSES,
-    DownloadControllerProtocol,
     DownloadFileSpec,
     DownloadRuntime,
     DownloadStatus,

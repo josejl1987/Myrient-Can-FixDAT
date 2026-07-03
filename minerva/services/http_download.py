@@ -50,7 +50,7 @@ class HttpDownloadAdapter:
                 # may be mocked in tests
                 if response.status_code == 429:
                     raise requests.exceptions.HTTPError(
-                        f"HTTP 429 Too Many Requests",
+                        "HTTP 429 Too Many Requests",
                         response=response,
                     )
 
