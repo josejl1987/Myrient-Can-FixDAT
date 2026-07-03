@@ -5,6 +5,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Protocol, runtime_checkable
 
 
@@ -23,6 +24,12 @@ class DownloadControllerProtocol(Protocol):
         destination: str,
         report_entry_id: str | None = None,
     ) -> str | None:
+        ...
+
+    def add_many_to_queue(
+        self,
+        items: Iterable[tuple[int, str, str | None]],
+    ) -> list[str]:
         ...
 class DownloadStatus(str, enum.Enum):
     """Lifecycle state for a single selected file."""
@@ -92,7 +99,7 @@ class TorrentFileInfo:
 
 @dataclass(frozen=True, slots=True)
 class TorrentInfo:
-    """Point-in-time qBittorrent torrent state."""
+    """Point-in-time torrent state (qBittorrent or native libtorrent)."""
 
     hash: str
     name: str
@@ -109,6 +116,8 @@ class TorrentInfo:
     seeds: int = 0
     peers: int = 0
     files: tuple[TorrentFileInfo, ...] = ()
+    seed_ratio: float = 0.0
+    seed_time_remaining: int = -1  # seconds, -1 = not seeding
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +125,7 @@ class DownloadRuntime:
     """Transient telemetry for one queue record.
 
     This data deliberately stays out of the application-state SQLite database;
-    it is refreshed from qBittorrent every polling cycle.
+    it is refreshed from the torrent engine every polling cycle.
     """
 
     record_id: str
@@ -131,18 +140,37 @@ class DownloadRuntime:
     ratio: float = 0.0
     save_path: str = ""
     raw_state: str = ""
+    seed_ratio: float = 0.0
+    seed_time_remaining: int = -1
 
 
 @dataclass
 class QueueRecord:
-    """Persistent queue entry representing one selected file."""
+    """Persistent queue entry representing one selected file.
+
+    The ``filename``, ``torrent_name``, ``collection`` and ``system`` fields
+    are display-only — they are not persisted in ``download_queue`` but are
+    resolved from the index's ``DownloadFileSpec`` when records are read via
+    :meth:`DownloadController.get_queue`.  Keeping them on this type lets the
+    Downloads page render real file names without a second lookup pass.
+    """
 
     id: str
     file_id: int
     report_entry_id: str | None = None
+    report_id: str | None = None
+    report_name: str = ""
     status: str = DownloadStatus.QUEUED.value
     qbit_hash: str | None = None
     destination: str = ""
     error: str | None = None
     created_at: str = ""
     updated_at: str = ""
+    # ── Display-only (resolved from DownloadFileSpec, not persisted) ─────
+    filename: str = ""
+    torrent_name: str = ""
+    collection: str = ""
+    system: str = ""
+    # ── Multi-source (archive.org) ──────────────────────────────────────
+    source: str = "minerva_torrent"  # DownloadSource value
+    source_ref: str | None = None    # file_id substitute for non-Minerva sources

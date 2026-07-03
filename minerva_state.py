@@ -30,7 +30,6 @@ from __future__ import annotations
 import logging
 import sqlite3
 import uuid
-from dataclasses import asdict, fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -64,6 +63,7 @@ REPORT_COLUMNS = frozenset({
 QUEUE_COLUMNS = frozenset({
     "file_id", "report_entry_id", "status", "qbit_hash",
     "destination", "error", "created_at", "updated_at",
+    "source", "source_ref",
 })
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -115,7 +115,6 @@ CREATE TABLE IF NOT EXISTS reference_dats (
 
 CREATE INDEX IF NOT EXISTS idx_reference_dats_scope
     ON reference_dats(collection, system);
-
 CREATE TABLE IF NOT EXISTS download_queue (
     id TEXT PRIMARY KEY,
     file_id INTEGER NOT NULL,
@@ -124,6 +123,8 @@ CREATE TABLE IF NOT EXISTS download_queue (
     qbit_hash TEXT,
     destination TEXT NOT NULL,
     error TEXT,
+    source TEXT NOT NULL DEFAULT 'minerva_torrent',
+    source_ref TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -225,22 +226,64 @@ def _row_to_reference_dat(row: sqlite3.Row) -> ReferenceDat:
         imported_at=row["imported_at"],
     )
 
-def _row_to_queue_record(row: sqlite3.Row) -> QueueRecord:
+def _row_to_queue_record(
+    row: sqlite3.Row,
+    report_id: str | None = None,
+    report_name: str = "",
+) -> QueueRecord:
     """Convert a ``download_queue`` row to a ``QueueRecord`` dataclass."""
+    def _col(name: str, default: object) -> object:
+        try:
+            return row[name]
+        except (KeyError, IndexError):
+            return default
+
     return QueueRecord(
         id=row["id"],
         file_id=row["file_id"],
         report_entry_id=row["report_entry_id"],
+        report_id=_col("report_id", report_id),
+        report_name=_col("report_name", report_name),
         status=row["status"],
         qbit_hash=row["qbit_hash"],
         destination=row["destination"],
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        source=_col("source", "minerva_torrent"),
+        source_ref=_col("source_ref", None),
     )
 
 
-# ── Main interface ─────────────────────────────────────────────────────────────
+
+def _enrich_queue_rows(
+    c: sqlite3.Connection,
+    rows: list[sqlite3.Row],
+) -> list[QueueRecord]:
+    """Build QueueRecords from raw download_queue rows, looking up report names.
+
+    Simple per-record SELECTs don't include report metadata, so we batch
+    resolve distinct report_entry_ids -> report_id/name in one query and
+    merge the results.
+    """
+    entry_ids = [r["report_entry_id"] for r in rows if r["report_entry_id"]]
+    report_map: dict[str, tuple[str | None, str]] = {}
+    if entry_ids:
+        placeholders = ", ".join("?" * len(entry_ids))
+        sql = f"""
+            SELECT re.id AS entry_id, re.report_id, r.name AS report_name
+            FROM report_entries re
+            JOIN reports r ON r.id = re.report_id
+            WHERE re.id IN ({placeholders})
+        """
+        for row in c.execute(sql, entry_ids):
+            report_map[row["entry_id"]] = (row["report_id"], row["report_name"])
+
+    records = []
+    for row in rows:
+        rid, rname = report_map.get(row["report_entry_id"], (None, ""))
+        records.append(_row_to_queue_record(row, report_id=rid, report_name=rname))
+    return records
 
 class MinervaState:
     """Persistent application-state database.
@@ -325,11 +368,17 @@ class MinervaState:
         if not self._is_schema_applied(c):
             c.executescript(SCHEMA_SQL)
             self._migrate_legacy_columns(c)
+            self._migrate_add_source_columns(c)
+        else:
+            self._migrate_legacy_columns(c)
+            self._migrate_add_source_columns(c)
         return c
 
     def _apply_schema(self) -> None:
         """Create tables and indexes if they do not already exist."""
-        with self.conn() as c:
+        # conn() applies the schema on first connect; the context manager
+        # commits the transaction so the tables persist.
+        with self.conn():
             pass
         log.debug("Schema applied")
 
@@ -364,6 +413,21 @@ class MinervaState:
             "UPDATE reports SET not_found_count = unmatched_count "
             "WHERE not_found_count = 0 AND unmatched_count > 0"
         )
+
+    def _migrate_add_source_columns(self, c: sqlite3.Connection) -> None:
+        """Add source and source_ref columns to download_queue for existing DBs."""
+        existing = {
+            r[1] for r in c.execute("PRAGMA table_info(download_queue)").fetchall()
+        }
+        if "source" not in existing:
+            c.execute(
+                "ALTER TABLE download_queue "
+                "ADD COLUMN source TEXT NOT NULL DEFAULT 'minerva_torrent'"
+            )
+        if "source_ref" not in existing:
+            c.execute(
+                "ALTER TABLE download_queue ADD COLUMN source_ref TEXT"
+            )
 
     # ── Reports ───────────────────────────────────────────────────────────
 
@@ -566,6 +630,32 @@ class MinervaState:
             else:
                 log.debug("Updated entry %s → decision=%s", entry_id, decision)
 
+    def update_entry_decisions_batch(
+        self,
+        updates: list[tuple[str, str, int | None]],
+    ) -> int:
+        """Batch-update decisions for multiple review entries in one transaction.
+
+        Each tuple is (entry_id, decision, selected_file_id). Avoids N
+        separate connection setups + commits.
+        """
+        if not updates:
+            return 0
+        with self.conn() as c:
+            for entry_id, decision, selected_file_id in updates:
+                if selected_file_id is not None:
+                    c.execute(
+                        "UPDATE report_entries SET decision = ?, selected_file_id = ? WHERE id = ?",
+                        (decision, selected_file_id, entry_id),
+                    )
+                else:
+                    c.execute(
+                        "UPDATE report_entries SET decision = ? WHERE id = ?",
+                        (decision, entry_id),
+                    )
+        log.debug("Batch-updated %d entry decisions", len(updates))
+        return len(updates)
+
     def get_report_by_path(self, path: str | Path) -> ReportSummary | None:
         """Return the report imported from *path*, if any."""
         with self.conn() as c:
@@ -607,17 +697,6 @@ class MinervaState:
                 ],
             )
 
-    def update_entry_decisions(
-        self,
-        updates: list[tuple[str, str, int | None]],
-    ) -> None:
-        """Apply decision updates in one transaction."""
-        with self.conn() as c:
-            c.executemany(
-                "UPDATE report_entries "
-                "SET decision = ?, selected_file_id = ? WHERE id = ?",
-                [(decision, file_id, entry_id) for entry_id, decision, file_id in updates],
-            )
 
     # ── Reference DATs ───────────────────────────────────────────────────
 
@@ -694,8 +773,9 @@ class MinervaState:
                 """
                 INSERT INTO download_queue
                     (id, file_id, report_entry_id, status, qbit_hash,
-                     destination, error, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     destination, error, source, source_ref,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -705,11 +785,45 @@ class MinervaState:
                     record.qbit_hash,
                     record.destination,
                     record.error,
+                    record.source,
+                    record.source_ref,
                     record.created_at,
                     record.updated_at,
                 ),
             )
         log.debug("Saved queue record %s (file_id=%d)", record.id, record.file_id)
+
+    def save_queue_records_batch(self, records: list[QueueRecord]) -> int:
+        """Insert multiple queue records in a single transaction.
+
+        Avoids the per-record connection overhead of calling
+        ``save_queue_record`` N times (N connection setups + N commits).
+        Returns the number of records inserted.
+        """
+        if not records:
+            return 0
+        rows = [
+            (
+                r.id, r.file_id, r.report_entry_id, r.status,
+                r.qbit_hash, r.destination, r.error,
+                r.source, r.source_ref,
+                r.created_at, r.updated_at,
+            )
+            for r in records
+        ]
+        with self.conn() as c:
+            c.executemany(
+                """
+                INSERT INTO download_queue
+                    (id, file_id, report_entry_id, status, qbit_hash,
+                     destination, error, source, source_ref,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        log.debug("Batch-inserted %d queue records", len(records))
+        return len(records)
 
     def update_queue_record(self, record_id: str, **updates: Any) -> None:
         """Update fields of an existing queue record.
@@ -756,13 +870,13 @@ class MinervaState:
         """Return all queue records, ordered by ``created_at`` descending.
 
         Returns:
-            List of ``QueueRecord`` objects (empty if the queue is empty).
+            List of ``QueueRecord`` objects (Empty if the queue is empty).
         """
         with self.conn() as c:
             rows = c.execute(
                 "SELECT * FROM download_queue ORDER BY created_at DESC",
             ).fetchall()
-        return [_row_to_queue_record(r) for r in rows]
+            return _enrich_queue_rows(c, rows)
 
     def get_queue_record(self, record_id: str) -> QueueRecord | None:
         with self.conn() as c:
