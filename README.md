@@ -3,7 +3,7 @@
 > **Myrient** shut down on 31 March 2026.
 > The **Minerva Archive** (https://minerva-archive.org/browse/) is its successor, run by the same team, but uses **torrents** instead of direct HTTP downloads.
 
-A GUI tool that downloads missing ROMs from the **Minerva Archive** via **qBittorrent**. Point it at your **RomVault fix report** or a **DAT file**, and it will download only what you're missing — using the 1050 `.torrent` files covering No-Intro, Redump, MAME, and more.
+A GUI tool that downloads missing ROMs from the **Minerva Archive** via **qBittorrent**. Point it at your **RomVault fix report** or a **DAT file**, and it will download only what you're missing — using the 1050 `.torrent` files covering No-Intro, Redump, MAME, and more. Also searches **archive.org** as a parallel source for files not in the Minerva index.
 
 ## Features
 
@@ -11,6 +11,7 @@ A GUI tool that downloads missing ROMs from the **Minerva Archive** via **qBitto
 - **No-Intro, Redump, RetroAchievements DAT Support** — Load any standard DAT; fuzzy-matches game names against the torrent index
 - **RomVault Fix Reports** — Native support for CSV and Fix DAT formats
 - **qBittorrent downloads** — Uses qBittorrent's Web API for selective-file torrent downloads (individual files from multi-file torrents)
+- **Archive.org Source** — Searches archive.org for files not in the Minerva index; downloads via torrent when available, falls back to HTTP streaming
 - **Match Review** — Interactive review screen to accept/reject fuzzy matches before queuing
 - **Download Dashboard** — Live progress, speed, ETA, seeds, ratio per torrent; pause/resume individual files
 - **Production-grade** — SQLite + FTS5 full-text search, LRU cache, confidence-scored matching with 7-tier formula
@@ -104,7 +105,8 @@ minerva/
 │   ├── download_controller.py  # Download orchestration — QbitMonitor,
 │   │                         #   queue management, file exposure, signals
 │   ├── domain/             # Pure domain types (dataclasses, enums)
-│   │   └── downloads.py    #   QueueRecord, DownloadRuntime, DownloadStatus
+│   │   ├── downloads.py    #   QueueRecord, DownloadRuntime, DownloadStatus
+│   │   └── sources.py      #   DownloadSource, Candidate, CandidateProvider
 │   ├── pages/              # Page panels (stacked in shell)
 │   │   ├── downloads.py    # Live download dashboard with telemetry
 │   │   ├── match_review.py # Interactive match acceptance screen
@@ -124,6 +126,9 @@ minerva/
 │   │   └── DatEntry        # Domain type for matched entries
 │   ├── parse_dat_file()    # No-Intro/Redump/RA DAT XML parser
 │   └── parse_rv_fix_csv() # RomVault CSV fix report parser
+├── services/               # Multi-source download services
+│   ├── archive_org.py     # Archive.org search client + candidate provider
+│   └── http_download.py   # HTTP streaming adapter with rate-limit retry
 ├── app/minerva_qbit.py     # qBittorrent Web API wrapper
 ├── app/minerva_state.py    # Global application state
 ├── minerva_gui.py          # Legacy entry point (delegates to shell)
@@ -154,13 +159,14 @@ tests/
 ### Download pipeline
 
 ```
-DAT/Fix Report → match_dat_detailed() → MatchReviewPage → DownloadController
-                                                                    ↓
-                                                            QbitMonitor (thread)
-                                                                    ↓
-                                                            qBittorrent Web API
-                                                                    ↓
-                                                            File exposure (hardlink/copy)
+DAT/Fix Report → CandidateProvider ──→ MatchReviewPage → DownloadController
+                 ├─ Minerva (match_dat_detailed)                    ↓
+                 └─ Archive.org (search_items, get_item)    QbitMonitor (thread)
+                                                             ├─ Minerva torrent → qBittorrent Web API
+                                                             ├─ archive.org torrent → qBittorrent
+                                                             └─ archive.org HTTP → HttpDownloadAdapter (stream)
+                                                                     ↓
+                                                             File exposure (hardlink/copy)
 ```
 
 ## CLI Usage
