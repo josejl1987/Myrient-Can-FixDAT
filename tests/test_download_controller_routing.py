@@ -51,3 +51,40 @@ def test_schedule_record_submission_dispatches_torrent():
     record = _make_record(DownloadSource.ARCHIVE_ORG_TORRENT, source_ref="test-item/game.zip")
     assert record.source == DownloadSource.ARCHIVE_ORG_TORRENT.value
     assert hasattr(DownloadController, "_submit_archive_org_torrent")
+
+
+def test_parse_source_ref_simple():
+    """_parse_source_ref splits 'id/filename' into (identifier, filename)."""
+    from minerva.app.download_controller import DownloadController
+
+    result = DownloadController._parse_source_ref("my-item/game.zip")
+    assert result == ("my-item", "game.zip")
+
+
+def test_parse_source_ref_with_subdir():
+    """_parse_source_ref handles filenames with subdirectory paths."""
+    from minerva.app.download_controller import DownloadController
+
+    result = DownloadController._parse_source_ref("collection/ntsc/game.chd")
+    assert result == ("collection", "ntsc/game.chd")
+
+
+def test_parse_source_ref_none():
+    """_parse_source_ref returns None for None input."""
+    from minerva.app.download_controller import DownloadController
+
+    assert DownloadController._parse_source_ref(None) is None
+
+
+def test_parse_source_ref_empty():
+    """_parse_source_ref returns None for empty string."""
+    from minerva.app.download_controller import DownloadController
+
+    assert DownloadController._parse_source_ref("") is None
+
+
+def test_parse_source_ref_no_slash():
+    """_parse_source_ref returns None when there's no slash."""
+    from minerva.app.download_controller import DownloadController
+
+    assert DownloadController._parse_source_ref("justanidentifier") is None

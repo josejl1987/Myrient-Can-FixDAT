@@ -17,9 +17,10 @@ from PyQt6 import QtCore, QtWidgets
 
 from minerva.app.app_state import AppState
 from minerva.domain.reports import ReviewEntry
+from minerva.domain.sources import DownloadSource
+from minerva.services.archive_org import ArchiveOrgCandidateProvider
 from minerva.ui.icons import Icons
 
-from minerva.domain.sources import DownloadSource
 log = logging.getLogger(__name__)
 
 
@@ -78,6 +79,49 @@ def _source_badge(source: DownloadSource) -> str:
     }
     return badges.get(source, '<span style="color:#888;">unknown</span>')
 
+
+class _TaskSignals(QtCore.QObject):
+    """Signals for thread-pool task notification."""
+    succeeded = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal()
+
+
+class _ArchiveOrgSearchTask(QtCore.QRunnable):
+    """Search archive.org on a worker thread."""
+
+    def __init__(self, provider: ArchiveOrgCandidateProvider, dat: object, system: str) -> None:
+        super().__init__()
+        self._provider = provider
+        self._dat = dat
+        self._system = system
+        self.signals = _TaskSignals()
+
+    def run(self) -> None:
+        results: object = None
+        exc: Exception | None = None
+        try:
+            results = self._provider.search(self._dat, self._system)
+        except Exception as e:
+            exc = e
+
+        # Emit results or error — the signals QObject may have been deleted
+        # during shutdown (RuntimeError), which we suppress gracefully.
+        if exc is not None:
+            _safe_emit(self.signals, "failed", str(exc))
+        else:
+            _safe_emit(self.signals, "succeeded", results)
+        _safe_emit(self.signals, "finished")
+
+
+def _safe_emit(signals: QtCore.QObject, signal_name: str, *args: object) -> None:
+    """Emit *signal_name* on *signals*, ignoring RuntimeError from deleted QObject."""
+    try:
+        sig = getattr(signals, signal_name)
+        sig.emit(*args)
+    except RuntimeError:
+        pass  # C++ QObject already deleted during shutdown
+
 class MatchDetailPanel(QtWidgets.QWidget):
     """Inline match detail panel — replaces InspectorScaffold in the
     3-zone Reports workspace.
@@ -104,6 +148,8 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._current_system: str | None = None
         self._current_filename: str | None = None
         self._threshold_value = 95
+        self._archive_org_provider = ArchiveOrgCandidateProvider()
+        self._running_tasks: set[_ArchiveOrgSearchTask] = set()
 
         self.setObjectName("matchDetailPanel")
         self.setMinimumWidth(310)
@@ -171,9 +217,16 @@ class MatchDetailPanel(QtWidgets.QWidget):
             f"</table>"
         )
 
-        # Build candidates list
-        candidates_html = self._build_candidates_html(db, entry, system)
-        self._candidates_detail.setText(candidates_html)
+        # Build Minerva candidates synchronously
+        candidates_html = self._build_minerva_candidates_html(db, entry, system)
+        placeholder = candidates_html + '<br><span style="color:#888;">Searching archive.org...</span>'
+        self._candidates_detail.setText(placeholder)
+
+        # Launch async archive.org search
+        from minerva_db import DatEntry
+        dat = DatEntry(filename=entry.filename, size=entry.size)
+        scope_system = system or ""
+        self._fetch_archive_org_candidates(dat, scope_system, candidates_html)
 
         self._approve_btn.setEnabled(True)
         self._ignore_btn.setEnabled(True)
@@ -360,8 +413,8 @@ class MatchDetailPanel(QtWidgets.QWidget):
 
     # ── Candidates helper ──────────────────────────────────────────────────
 
-    def _build_candidates_html(self, db, entry: ReviewEntry, system: str | None) -> str:
-        """Build HTML showing top match candidates."""
+    def _build_minerva_candidates_html(self, db, entry: ReviewEntry, system: str | None) -> str:
+        """Build HTML showing top Minerva match candidates (sync)."""
         from minerva_db import DatEntry
 
         dat = DatEntry(filename=entry.filename, size=entry.size)
@@ -398,16 +451,32 @@ class MatchDetailPanel(QtWidgets.QWidget):
                 f"<td>{_source_badge(DownloadSource.MINERVA_TORRENT)}</td></tr>"
             )
 
-        # Try to fetch archive.org candidates
-        try:
-            from minerva.services.archive_org import ArchiveOrgCandidateProvider
-            archive_provider = ArchiveOrgCandidateProvider()
-            archive_candidates = archive_provider.search(dat, scope_system)
-            for ac in archive_candidates:
+
+        return (
+            "<table cellpadding='2' width='100%'>"
+        "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
+        "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
+            + "".join(rows) + "</table>"
+        )
+
+    def _fetch_archive_org_candidates(
+        self, dat: object, system: str, minerva_html: str
+    ) -> None:
+        """Fetch archive.org candidates in a worker thread."""
+        task = _ArchiveOrgSearchTask(self._archive_org_provider, dat, system)
+
+        def on_succeeded(candidates: object) -> None:
+            candidates_list = list(candidates) if candidates else []
+            if not candidates_list:
+                self._candidates_detail.setText(minerva_html)
+                return
+
+            rows = []
+            for ac in candidates_list:
                 conf_str = f"{ac.confidence:.0%}"
                 title = ac.title[:50]
                 source_badge_html = _source_badge(ac.source)
-                seeders = str(ac.seeders) if ac.seeders is not None else "—"
+                seeders = str(ac.seeders) if ac.seeders is not None else "\u2014"
                 href_val = f"archive_org:{ac.source.value}:{ac.source_ref}"
                 rows.append(
                     f"<tr><td>  </td>"
@@ -416,15 +485,24 @@ class MatchDetailPanel(QtWidgets.QWidget):
                     f"<td>{ac.method}</td><td>{seeders}</td>"
                     f"<td>{source_badge_html}</td></tr>"
                 )
-        except Exception:
-            log.debug("Archive.org candidate fetch failed", exc_info=True)
 
-        return (
-            "<table cellpadding='2' width='100%'>"
-        "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
-        "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
-            + "".join(rows) + "</table>"
-        )
+            html = minerva_html.rstrip("</table>") + "".join(rows) + "</table>"
+            self._candidates_detail.setText(html)
+
+        def on_failed(msg: str) -> None:
+            log.debug("Archive.org candidate fetch failed: %s", msg)
+            self._candidates_detail.setText(
+                minerva_html + '<br><span style="color:#888;">Archive.org unavailable</span>'
+            )
+
+        def cleanup() -> None:
+            self._running_tasks.discard(task)
+
+        task.signals.succeeded.connect(on_succeeded)
+        task.signals.failed.connect(on_failed)
+        task.signals.finished.connect(cleanup)
+        self._running_tasks.add(task)
+        QtCore.QThreadPool.globalInstance().start(task)
 
     def _on_link_activated(self, url: str) -> None:
         """Handle clicks on candidate links — emit archive_org_candidate_selected."""

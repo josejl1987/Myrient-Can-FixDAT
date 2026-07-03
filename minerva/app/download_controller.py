@@ -832,19 +832,20 @@ class DownloadController(QtCore.QObject):
 
     # ── Archive.org HTTP download ───────────────────────────────────────
 
+    @staticmethod
+    def _parse_source_ref(source_ref: str | None) -> tuple[str, str] | None:
+        """Parse 'identifier/filename' into (identifier, filename). Returns None if invalid."""
+        if not source_ref:
+            return None
+        parts = source_ref.split("/", 1)
+        if len(parts) != 2:
+            return None
+        return parts[0], parts[1]
+
     def _submit_http(self, record: QueueRecord) -> None:
         """Download a file from archive.org via HTTP streaming."""
-        if not record.source_ref:
-            self._state.update_queue_record(
-                record.id,
-                status=DownloadStatus.FAILED.value,
-                error="Missing source_ref for archive.org HTTP download",
-            )
-            self._emit_changed()
-            return
-
-        parts = record.source_ref.split("/", 1)
-        if len(parts) != 2:
+        parsed = self._parse_source_ref(record.source_ref)
+        if parsed is None:
             self._state.update_queue_record(
                 record.id,
                 status=DownloadStatus.FAILED.value,
@@ -852,11 +853,10 @@ class DownloadController(QtCore.QObject):
             )
             self._emit_changed()
             return
-
-        identifier, filename = parts
+        identifier, filename = parsed
         from urllib.parse import quote
 
-        url = f"https://archive.org/download/{identifier}/{quote(filename)}"
+        url = f"https://archive.org/download/{identifier}/{quote(filename, safe='')}"
 
         self._state.update_queue_record(
             record.id,
@@ -895,17 +895,8 @@ class DownloadController(QtCore.QObject):
 
     def _submit_archive_org_torrent(self, record: QueueRecord) -> None:
         """Download via archive.org's torrent file using qBittorrent."""
-        if not record.source_ref:
-            self._state.update_queue_record(
-                record.id,
-                status=DownloadStatus.FAILED.value,
-                error="Missing source_ref for archive.org torrent download",
-            )
-            self._emit_changed()
-            return
-
-        parts = record.source_ref.split("/", 1)
-        if len(parts) != 2:
+        parsed = self._parse_source_ref(record.source_ref)
+        if parsed is None:
             self._state.update_queue_record(
                 record.id,
                 status=DownloadStatus.FAILED.value,
@@ -913,8 +904,7 @@ class DownloadController(QtCore.QObject):
             )
             self._emit_changed()
             return
-
-        identifier, filename = parts
+        identifier, filename = parsed
         torrent_url = f"https://archive.org/download/{identifier}/{identifier}_archive.torrent"
 
         self._state.update_queue_record(
@@ -927,6 +917,7 @@ class DownloadController(QtCore.QObject):
 
         def operation() -> dict[str, object]:
             import tempfile
+            from pathlib import PurePosixPath
 
             client = self._logged_in_clone()
             response = requests.get(torrent_url, timeout=30)
@@ -948,13 +939,15 @@ class DownloadController(QtCore.QObject):
                 time.sleep(0.5)
                 files = client.get_files(torrent_hash)
 
+            target_basename = PurePosixPath(filename).name.lower()
             target_index = None
             all_indices = []
             for item in files:
                 idx = int(item.get("index", -1))
                 if idx >= 0:
                     all_indices.append(idx)
-                if filename.lower() in str(item.get("name", "")).lower():
+                item_name = str(item.get("name", "")).lower()
+                if target_basename in item_name or item_name.endswith(target_basename):
                     target_index = idx
 
             if target_index is None:
