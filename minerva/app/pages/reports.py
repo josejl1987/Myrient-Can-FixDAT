@@ -14,8 +14,24 @@ from PyQt6.QtCore import Qt
 
 from minerva.app.app_state import AppState
 from minerva.app.pages.base import BasePage
+from minerva.app.task_runner import TaskRunner
+from minerva.domain.reports import (
+    FolderImportSummary,
+    QueueResult,
+    ReportSummary,
+    ReviewEntry,
+)
+from minerva.services.report_acquisition import (
+    ReportAcquisitionService,
+    romm_destination,
+)
+from minerva.ui.icons import Icons
+from minerva.ui.models.delegates import DisplayDelegate, SizeDelegate
+from minerva.ui.models.record_model import ColumnSpec, RecordListModel
 from minerva.ui.theme import ThemeTokens
 from minerva.ui.widgets.content_state import ContentState
+from minerva.ui.widgets.empty_state import EmptyState
+from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
 from minerva.ui.widgets.metric_card import MetricCard, MetricKind
 from minerva.ui.widgets.metric_strip import MetricStrip
 from minerva.ui.widgets.notification_banner import NotificationBanner
@@ -23,17 +39,8 @@ from minerva.ui.widgets.page_header import PageHeader
 from minerva.ui.widgets.report_navigator import ReportNavigator
 from minerva.ui.widgets.responsive_workspace import ResponsiveWorkspace
 from minerva.ui.widgets.segmented_control import SegmentedControl
-from minerva.ui.widgets.status_badge import BadgeKind, StatusBadge
+from minerva.ui.widgets.status_badge import BadgeKind
 from minerva.ui.widgets.surface_panel import SurfacePanel
-from minerva.ui.widgets.property_list import PropertyList
-from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
-from minerva.app.task_runner import TaskRunner
-from minerva.services.report_acquisition import ReportAcquisitionService, romm_destination
-from minerva.domain.reports import FolderImportSummary, QueueResult, ReportSummary, ReviewEntry
-from minerva.ui.icons import Icons
-from minerva.ui.models.delegates import DisplayDelegate, SizeDelegate
-from minerva.ui.models.record_model import ColumnSpec, RecordListModel
-from minerva.ui.widgets.empty_state import EmptyState
 from minerva_db import MinervaDB, parse_dat_file, parse_rv_fix_csv
 from minerva_state import MinervaState
 
@@ -347,6 +354,7 @@ class ReportsPage(BasePage):
         self._match_detail = MatchDetailPanel(app_state)
         self._match_detail.decision_changed.connect(self._on_decision_changed)
         self._match_detail.bulk_decision_requested.connect(self._on_bulk_decision)
+        self._match_detail.archive_org_candidate_selected.connect(self._on_archive_org_candidate_selected)
 
         # Queue approved button — single action replacing dual queue mechanisms
         self._queue_approved_btn = QtWidgets.QPushButton("Queue approved")
@@ -382,8 +390,8 @@ class ReportsPage(BasePage):
         self._no_index_state.action_clicked.connect(self._rebuild_index)
         self._no_qbit_state = EmptyState(
             icon=Icons.status_warning(),
-            title="Can't reach qBittorrent",
-            description="Check your qBittorrent connection settings.",
+            title="Can't reach download engine",
+            description="Check your connection settings.",
             action_text="Open Settings",
         )
         self._no_qbit_state.action_clicked.connect(self._open_settings)
@@ -553,6 +561,28 @@ class ReportsPage(BasePage):
                     self, "Bulk approve",
                     f"{updated} {filter_type} entries approved",
                 )
+        finally:
+            self._updating = False
+
+    def _on_archive_org_candidate_selected(
+        self, report_id: str, entry_id: str, source: str, source_ref: str
+    ) -> None:
+        """Handle archive.org candidate selection from MatchDetailPanel."""
+        if self._updating:
+            return
+        self._updating = True
+        try:
+            MinervaState().set_entry_decision(
+                report_id, entry_id, "accept",
+                selected_source=source,
+                selected_source_ref=source_ref,
+            )
+            self._refresh_entry_data()
+            self._check_review_complete(report_id)
+            NotificationBanner.show_success(
+                self, "Archive.org candidate",
+                f"Selected: {source_ref}",
+            )
         finally:
             self._updating = False
 
@@ -932,7 +962,7 @@ class ReportsPage(BasePage):
             controller = getattr(self.window(), "download_controller", None)
             if controller is None:
                 NotificationBanner.show_error(
-                    self, "Queue failed", "The qBittorrent controller is not initialised",
+                    self, "Queue failed", "The download controller is not initialised",
                 )
                 return
             controller.reconcile()
@@ -1052,7 +1082,7 @@ class ReportsPage(BasePage):
         for rid in ids:
             try:
                 self._app_state.reports.delete_report(rid)
-            except Exception as exc:
+            except Exception:
                 log.error("delete_report %s failed", rid[:8], exc_info=True)
                 failed += 1
         self._selected_report_ids.clear()
@@ -1080,7 +1110,7 @@ class ReportsPage(BasePage):
             if controller is None:
                 NotificationBanner.show_error(
                     self, "Downloads unavailable",
-                    "The qBittorrent controller is not initialised",
+                    "The download controller is not initialised",
                 )
                 return
             controller.reconcile()
@@ -1128,7 +1158,10 @@ class ReportsPage(BasePage):
             entry
             for entry in entries
             if entry.decision in {"accept", "fuzzy"}
-            and (entry.selected_file_id or entry.automatic_file_id) is not None
+            and (
+                (entry.selected_file_id or entry.automatic_file_id) is not None
+                or entry.selected_source_ref is not None
+            )
         ]
         if not approved:
             NotificationBanner.show_warning(
@@ -1140,28 +1173,59 @@ class ReportsPage(BasePage):
         if controller is None:
             NotificationBanner.show_error(
                 self, "Downloads unavailable",
-                "The qBittorrent controller is not initialised",
+                "The download controller is not initialised",
             )
             return
         controller.reconcile()
-        ids = [entry.selected_file_id or entry.automatic_file_id for entry in approved]
-        items = {item.id: item for item in MinervaDB().get_files_by_ids(ids)}
         output_root = Path(
             QtCore.QSettings("MinervaFixDAT", "MinervaGUI").value("output_dir", "downloads", str)
         )
-        queue: list[tuple[int, str, str | None]] = []
-        for entry in approved:
-            file_id = entry.selected_file_id or entry.automatic_file_id
-            item = items.get(file_id)
-            if item is None:
-                log.warning("_queue_approved: file_id %s not found in index, skipping", file_id)
-                continue
-            destination = romm_destination(output_root, item.system, item.basename)
-            queue.append((item.id, str(destination), entry.id))
-        controller.add_many_to_queue(queue)
-        NotificationBanner.show_success(
-            self, "Added to queue", f"Queued {len(queue):,} reviewed files"
-        )
+
+        # Split entries by source
+        minerva_entries = [
+            e for e in approved
+            if e.selected_source == "minerva_torrent"
+            and (e.selected_file_id or e.automatic_file_id) is not None
+        ]
+        ao_entries = [
+            e for e in approved
+            if e.selected_source != "minerva_torrent"
+            and e.selected_source_ref is not None
+        ]
+
+        queue: list[tuple[int, str, str | None, str, str | None]] = []
+
+        # Minerva entries — look up file_id in index
+        if minerva_entries:
+            ids = [e.selected_file_id or e.automatic_file_id for e in minerva_entries]
+            items = {item.id: item for item in MinervaDB().get_files_by_ids(ids)}
+            for entry in minerva_entries:
+                file_id = entry.selected_file_id or entry.automatic_file_id
+                item = items.get(file_id)
+                if item is None:
+                    log.warning("_queue_approved: file_id %s not found in index, skipping", file_id)
+                    continue
+                destination = romm_destination(output_root, item.system, item.basename)
+                queue.append((item.id, str(destination), entry.id, "minerva_torrent", None))
+
+        # Archive.org entries — use source_ref directly
+        for entry in ao_entries:
+            dest_name = Path(entry.filename).name
+            system = report.system or ""
+            destination = romm_destination(output_root, system, dest_name)
+            queue.append((0, str(destination), entry.id, entry.selected_source, entry.selected_source_ref))
+
+        if queue:
+            controller.add_many_to_queue(queue)
+            NotificationBanner.show_success(
+                self, "Added to queue",
+                f"Queued {len(queue):,} reviewed files "
+                f"({len(minerva_entries)} Minerva, {len(ao_entries)} archive.org)",
+            )
+        else:
+            NotificationBanner.show_warning(
+                self, "Nothing to queue", "No downloadable files found for approved entries",
+            )
 
     def _queue_report(self, report_id: str) -> None:
         """Queue ready and approved entries for a single report."""
@@ -1170,7 +1234,7 @@ class ReportsPage(BasePage):
         if controller is None:
             NotificationBanner.show_error(
                 self, "Downloads unavailable",
-                "The qBittorrent controller is not initialised",
+                "The download controller is not initialised",
             )
             return
         controller.reconcile()

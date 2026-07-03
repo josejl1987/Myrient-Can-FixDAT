@@ -90,6 +90,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
 
     decision_changed = QtCore.pyqtSignal(str, str, str)  # report_id, entry_id, decision
     bulk_decision_requested = QtCore.pyqtSignal(str, str, int)  # report_id, filter_type, threshold
+    archive_org_candidate_selected = QtCore.pyqtSignal(str, str, str, str)  # report_id, entry_id, source, source_ref
 
     def __init__(
         self,
@@ -301,6 +302,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._candidates_detail.setObjectName("mutedLabel")
         self._candidates_detail.setWordWrap(True)
         comp_layout.addWidget(self._candidates_detail)
+        self._candidates_detail.linkActivated.connect(self._on_link_activated)
 
         comp_layout.addStretch(1)
         root.addWidget(self._comparison, 1)
@@ -406,9 +408,11 @@ class MatchDetailPanel(QtWidgets.QWidget):
                 title = ac.title[:50]
                 source_badge_html = _source_badge(ac.source)
                 seeders = str(ac.seeders) if ac.seeders is not None else "—"
+                href_val = f"archive_org:{ac.source.value}:{ac.source_ref}"
                 rows.append(
                     f"<tr><td>  </td>"
-                    f"<td>{title}</td><td>{conf_str}</td>"
+                    f'<td><a href="{href_val}" style="color:#4a9eff;text-decoration:none;">{title}</a></td>'
+                    f"<td>{conf_str}</td>"
                     f"<td>{ac.method}</td><td>{seeders}</td>"
                     f"<td>{source_badge_html}</td></tr>"
                 )
@@ -421,6 +425,18 @@ class MatchDetailPanel(QtWidgets.QWidget):
         "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
             + "".join(rows) + "</table>"
         )
+
+    def _on_link_activated(self, url: str) -> None:
+        """Handle clicks on candidate links — emit archive_org_candidate_selected."""
+        if url.startswith("archive_org:"):
+            parts = url.split(":", 2)
+            if len(parts) == 3:
+                source = parts[1]
+                source_ref = parts[2]
+                if self._current_report_id and self._current_entry_id:
+                    self.archive_org_candidate_selected.emit(
+                        self._current_report_id, self._current_entry_id, source, source_ref
+                    )
 
     # ── CDRomance search ────────────────────────────────────────────────
 
