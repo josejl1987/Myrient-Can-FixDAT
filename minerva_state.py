@@ -96,7 +96,8 @@ CREATE TABLE IF NOT EXISTS report_entries (
     automatic_confidence REAL,
     decision TEXT NOT NULL DEFAULT 'pending',
     selected_file_id INTEGER,
-    FOREIGN KEY(report_id) REFERENCES reports(id) ON DELETE CASCADE
+    selected_source TEXT NOT NULL DEFAULT 'minerva_torrent',
+    selected_source_ref TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_report_entries_report
@@ -210,6 +211,8 @@ def _row_to_entry(row: sqlite3.Row) -> ReviewEntry:
         decision=decision,
         resolution=resolution,
         selected_file_id=row["selected_file_id"],
+        selected_source=_col(row, "selected_source", "minerva_torrent"),
+        selected_source_ref=_col(row, "selected_source_ref", None),
     )
 
 
@@ -369,9 +372,11 @@ class MinervaState:
             c.executescript(SCHEMA_SQL)
             self._migrate_legacy_columns(c)
             self._migrate_add_source_columns(c)
+            self._migrate_add_entry_source_columns(c)
         else:
             self._migrate_legacy_columns(c)
             self._migrate_add_source_columns(c)
+            self._migrate_add_entry_source_columns(c)
         return c
 
     def _apply_schema(self) -> None:
@@ -427,6 +432,21 @@ class MinervaState:
         if "source_ref" not in existing:
             c.execute(
                 "ALTER TABLE download_queue ADD COLUMN source_ref TEXT"
+            )
+
+    def _migrate_add_entry_source_columns(self, c: sqlite3.Connection) -> None:
+        """Add selected_source and selected_source_ref to report_entries for existing DBs."""
+        existing = {
+            r[1] for r in c.execute("PRAGMA table_info(report_entries)").fetchall()
+        }
+        if "selected_source" not in existing:
+            c.execute(
+                "ALTER TABLE report_entries "
+                "ADD COLUMN selected_source TEXT NOT NULL DEFAULT 'minerva_torrent'"
+            )
+        if "selected_source_ref" not in existing:
+            c.execute(
+                "ALTER TABLE report_entries ADD COLUMN selected_source_ref TEXT"
             )
 
     # ── Reports ───────────────────────────────────────────────────────────
@@ -557,8 +577,9 @@ class MinervaState:
                 INSERT INTO report_entries
                     (id, report_id, ordinal, filename, size,
                      automatic_file_id, automatic_method,
-                     automatic_confidence, decision, selected_file_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     automatic_confidence, decision, selected_file_id,
+                     selected_source, selected_source_ref)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -572,6 +593,8 @@ class MinervaState:
                         e.automatic_confidence,
                         e.decision,
                         e.selected_file_id,
+                        e.selected_source,
+                        e.selected_source_ref,
                     )
                     for e in entries
                 ],
@@ -630,6 +653,57 @@ class MinervaState:
             else:
                 log.debug("Updated entry %s → decision=%s", entry_id, decision)
 
+    def set_entry_decision(
+        self,
+        report_id: str,
+        entry_id: str,
+        decision: str,
+        selected_file_id: int | None = None,
+        selected_source: str | None = None,
+        selected_source_ref: str | None = None,
+    ) -> None:
+        """Update decision and optional source selection for a review entry.
+
+        Unlike ``update_entry_decision``, this method accepts source
+        metadata (``selected_source`` / ``selected_source_ref``) for
+        archive.org candidates.
+
+        Args:
+            report_id: The report the entry belongs to (unused, kept for
+                API consistency).
+            entry_id: The ``id`` of the review entry.
+            decision: New decision value (``"pending"``, ``"accept"``,
+                ``"reject"``, or ``"fuzzy"``).
+            selected_file_id: Optional ``files.id`` override.
+            selected_source: Optional source identifier (e.g.
+                ``"archive_org_http"``).
+            selected_source_ref: Optional source reference
+                (e.g. ``"identifier/filename"``).
+        """
+        updates: dict[str, str | int | None] = {"decision": decision}
+        if selected_file_id is not None:
+            updates["selected_file_id"] = selected_file_id
+        if selected_source is not None:
+            updates["selected_source"] = selected_source
+        if selected_source_ref is not None:
+            updates["selected_source_ref"] = selected_source_ref
+        columns = ", ".join(f"{k} = ?" for k in updates)
+        params = list(updates.values()) + [entry_id]
+        with self.conn() as c:
+            cur = c.execute(
+                f"UPDATE report_entries SET {columns} WHERE id = ?",
+                params,
+            )
+            if cur.rowcount == 0:
+                log.warning("set_entry_decision: no entry found with id %s", entry_id)
+            else:
+                log.debug(
+                    "Updated entry %s → decision=%s selected_source=%s",
+                    entry_id,
+                    decision,
+                    selected_source,
+                )
+
     def update_entry_decisions_batch(
         self,
         updates: list[tuple[str, str, int | None]],
@@ -677,8 +751,9 @@ class MinervaState:
                 INSERT INTO report_entries
                     (id, report_id, ordinal, filename, size,
                      automatic_file_id, automatic_method,
-                     automatic_confidence, decision, selected_file_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     automatic_confidence, decision, selected_file_id,
+                     selected_source, selected_source_ref)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -692,6 +767,8 @@ class MinervaState:
                         entry.automatic_confidence,
                         entry.decision,
                         entry.selected_file_id,
+                        entry.selected_source,
+                        entry.selected_source_ref,
                     )
                     for entry in entries
                 ],

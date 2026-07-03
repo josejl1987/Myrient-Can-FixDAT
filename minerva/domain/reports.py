@@ -314,8 +314,13 @@ class ReviewEntry:
     selected_file_id:
         The ``files.id`` the user selected (when different from the
         automatic suggestion or after manual override).
+    selected_source:
+        Source identifier for external candidates (e.g.
+        ``"archive_org_http"``).  Defaults to ``"minerva_torrent"``.
+    selected_source_ref:
+        Reference string for the selected source, e.g.
+        ``"identifier/filename"`` for archive.org candidates.
     """
-
     id: str
     report_id: str
     ordinal: int
@@ -327,3 +332,6 @@ class ReviewEntry:
     resolution: ResolutionState = ResolutionState.REVIEW_REQUIRED
     decision: str = Decision.PENDING
     selected_file_id: int | None = None
+    # ── Multi-source selection (archive.org) ───────────────────────────
+    selected_source: str = "minerva_torrent"  # DownloadSource value
+    selected_source_ref: str | None = None    # "identifier/filename" for archive.org
