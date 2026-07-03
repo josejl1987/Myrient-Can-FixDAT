@@ -11,18 +11,15 @@ from __future__ import annotations
 
 import logging
 import webbrowser
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
 from urllib.parse import quote
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from minerva.app.app_state import AppState
 from minerva.domain.reports import ReviewEntry
 from minerva.ui.icons import Icons
-from minerva.ui.theme import ThemeTokens
 
+from minerva.domain.sources import DownloadSource
 log = logging.getLogger(__name__)
 
 
@@ -62,6 +59,24 @@ _SYSTEM_TO_CDR_SLUG = {
     "DOS": "msdos",
 }
 
+
+def _source_badge(source: DownloadSource) -> str:
+    """Return an HTML badge string for a candidate source."""
+    badges = {
+        DownloadSource.MINERVA_TORRENT: (
+            '<span style="background:#3b82f6;color:white;padding:1px 6px;'
+            'border-radius:3px;font-size:10px;">Minerva</span>'
+        ),
+        DownloadSource.ARCHIVE_ORG_TORRENT: (
+            '<span style="background:#22c55e;color:white;padding:1px 6px;'
+            'border-radius:3px;font-size:10px;">archive.org \U0001f310</span>'
+        ),
+        DownloadSource.ARCHIVE_ORG_HTTP: (
+            '<span style="background:#f97316;color:white;padding:1px 6px;'
+            'border-radius:3px;font-size:10px;">archive.org \u2b07</span>'
+        ),
+    }
+    return badges.get(source, '<span style="color:#888;">unknown</span>')
 
 class MatchDetailPanel(QtWidgets.QWidget):
     """Inline match detail panel — replaces InspectorScaffold in the
@@ -377,13 +392,33 @@ class MatchDetailPanel(QtWidgets.QWidget):
             rows.append(
                 f"<tr style='{style}'><td>{marker}</td>"
                 f"<td>{title[:50]}</td><td>{conf_str}</td>"
-                f"<td>{method}</td><td>{region_str}</td></tr>"
+                f"<td>{method}</td><td>{region_str}</td>"
+                f"<td>{_source_badge(DownloadSource.MINERVA_TORRENT)}</td></tr>"
             )
+
+        # Try to fetch archive.org candidates
+        try:
+            from minerva.services.archive_org import ArchiveOrgCandidateProvider
+            archive_provider = ArchiveOrgCandidateProvider()
+            archive_candidates = archive_provider.search(dat, scope_system)
+            for ac in archive_candidates:
+                conf_str = f"{ac.confidence:.0%}"
+                title = ac.title[:50]
+                source_badge_html = _source_badge(ac.source)
+                seeders = str(ac.seeders) if ac.seeders is not None else "—"
+                rows.append(
+                    f"<tr><td>  </td>"
+                    f"<td>{title}</td><td>{conf_str}</td>"
+                    f"<td>{ac.method}</td><td>{seeders}</td>"
+                    f"<td>{source_badge_html}</td></tr>"
+                )
+        except Exception:
+            log.debug("Archive.org candidate fetch failed", exc_info=True)
 
         return (
             "<table cellpadding='2' width='100%'>"
-            "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
-            "<td><b>Method</b></td><td><b>Region</b></td></tr>"
+        "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
+        "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
             + "".join(rows) + "</table>"
         )
 
