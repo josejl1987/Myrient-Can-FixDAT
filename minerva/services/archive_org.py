@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from internetarchive import get_item, search_items
 
-from minerva.domain.sources import Candidate, CandidateProvider, DownloadSource
+from minerva.domain.sources import Candidate, DownloadSource
 from minerva_db import DatEntry, core_title, stem_from_romname, title_keywords
 
 log = logging.getLogger(__name__)
@@ -90,6 +90,20 @@ def _keyword_overlap(entry_keywords: set[str], title: str) -> float:
     return matches / len(entry_keywords)
 
 
+def _build_archive_org_query(title: str) -> str:
+    """Build a safe archive.org advanced-search query from a cleaned title.
+
+    The archive.org search endpoint uses Lucene syntax, so bare words like
+    ``sonic and knuckles`` are interpreted as boolean operators. We quote the
+    title and restrict to ``mediatype:data`` to get ROM/data oriented items.
+    """
+    if not title:
+        return ""
+    # Escape quotes in the title so they don't break the phrase query.
+    escaped = title.replace('"', '\\"')
+    return f'mediatype:data AND title:"{escaped}"'
+
+
 # ── In-memory TTL cache decorator ─────────────────────────────────────────────
 def _ttl_cache(ttl: int = _CACHE_TTL):
     """Decorator that caches the wrapped method's return value for *ttl* seconds.
@@ -164,7 +178,7 @@ class ArchiveOrgCandidateProvider:
     def search(self, entry: DatEntry, system: str | None = None) -> list[Candidate]:
         """Search Archive.org and return candidates matching *entry*."""
         stem = stem_from_romname(entry.filename)
-        query = core_title(stem)
+        query = _build_archive_org_query(core_title(stem))
         if not query:
             return []
 
@@ -191,7 +205,7 @@ class ArchiveOrgCandidateProvider:
             boost = _collection_boost(collections if isinstance(collections, list) else (collections,))
 
             # Only consider items with non-zero keyword overlap.
-            if overlap <= 0 and not query.lower() in item_title.lower():
+            if overlap <= 0 and query.lower() not in item_title.lower():
                 continue
 
             # Fetch item metadata (files, torrents).

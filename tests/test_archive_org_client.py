@@ -198,9 +198,16 @@ class TestArchiveOrgCandidateProvider:
 
         def fake_search_items(query, **kwargs):
             call_log["search"] = True
-            # Filter fixture to items whose title contains the query
+            # Extract the quoted title from the Lucene-style query.
+            title_start = query.find('title:"')
+            if title_start >= 0:
+                title_start += len('title:"')
+                title_end = query.find('"', title_start)
+                search_title = query[title_start:title_end] if title_end >= 0 else query[title_start:]
+            else:
+                search_title = query
             return iter(
-                [r for r in search_fixture if query.lower() in r.get("title", "").lower()]
+                [r for r in search_fixture if search_title.lower() in r.get("title", "").lower()]
             )
 
         class FakeItem:
@@ -260,3 +267,12 @@ class TestArchiveOrgCandidateProvider:
         provider = ArchiveOrgCandidateProvider()
         candidates = provider.search(entry)
         assert candidates == []
+
+
+def test_build_archive_org_query_quotes_title():
+    """_build_archive_org_query wraps the title in a title: phrase and escapes quotes."""
+    from minerva.services.archive_org import _build_archive_org_query
+
+    assert _build_archive_org_query("super mario bros") == 'mediatype:data AND title:"super mario bros"'
+    assert _build_archive_org_query('game "special" edition') == 'mediatype:data AND title:"game \\"special\\" edition"'
+    assert _build_archive_org_query("") == ""
