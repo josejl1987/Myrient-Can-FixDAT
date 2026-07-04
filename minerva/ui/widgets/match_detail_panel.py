@@ -89,30 +89,95 @@ class _TaskSignals(QtCore.QObject):
     finished = QtCore.pyqtSignal()
 
 
-class _ArchiveOrgSearchTask(QtCore.QRunnable):
-    """Search archive.org on a worker thread."""
+class _MatchSearchTask(QtCore.QRunnable):
+    """Run Minerva + archive.org candidate matching on a worker thread.
 
-    def __init__(self, provider: ArchiveOrgCandidateProvider, dat: object, system: str) -> None:
+    Combines both searches into a single task so the UI only spawns one
+    thread-pool job per entry selection, and the UI thread never blocks
+    on SQLite FTS5 queries or network calls.
+    """
+
+    def __init__(
+        self,
+        db: object,
+        provider: ArchiveOrgCandidateProvider,
+        dat: object,
+        system: str,
+        automatic_file_id: int | None,
+    ) -> None:
         super().__init__()
         self._provider = provider
         self._dat = dat
         self._system = system
+        self._automatic_file_id = automatic_file_id
         self.signals = _TaskSignals()
+        # Extract the DB path so the worker thread can open its own connection
+        # — sharing a MinervaDB across threads causes "database is locked"
+        db_path = getattr(db, '_path', None) or getattr(db, 'index_path', None)
+        if db_path is None:
+            from minerva_db import DEFAULT_INDEX_PATH
+            db_path = DEFAULT_INDEX_PATH
+        self._db_path = db_path
 
     def run(self) -> None:
-        results: object = None
+        result: dict | None = None
         exc: Exception | None = None
         try:
-            results = self._provider.search(self._dat, self._system)
+            # Open a thread-local DB connection — sharing the main thread's
+            # MinervaDB instance causes "database is locked" under SQLite.
+            from minerva_db import MinervaDB
+            db = MinervaDB(str(self._db_path))
+
+            # ── Minerva candidates (DB queries, off the UI thread) ──
+            minerva_candidates = db.match_dat_detailed(
+                [self._dat], collection="", system=self._system, candidate_limit=5,
+            )
+            minerva_rows: list[dict] = []
+            if minerva_candidates.get("results"):
+                raw_cands = minerva_candidates["results"][0].get("candidates", [])
+                file_ids = [c["file_id"] for c in raw_cands]
+                regions_map = db.get_file_regions(file_ids) if file_ids else {}
+                for c in raw_cands:
+                    fid = c["file_id"]
+                    minerva_rows.append({
+                        "file_id": fid,
+                        "confidence": c.get("confidence", 0),
+                        "method": c.get("method", "?"),
+                        "title": c.get("title", "—"),
+                        "regions": regions_map.get(fid, []),
+                    })
+
+            # ── Match info for the comparison table ──
+            match_info: dict = {}
+            if self._automatic_file_id is not None:
+                items = db.get_files_by_ids([self._automatic_file_id])
+                if items:
+                    it = items[0]
+                    match_info = {
+                        "basename": it.basename,
+                        "regions": it.regions,
+                        "source_torrent": it.source_torrent,
+                        "size": it.size,
+                    }
+
+            # ── Archive.org candidates (network call, off UI thread) ──
+            try:
+                ao_candidates = self._provider.search(self._dat, self._system)
+            except Exception:
+                ao_candidates = []
+
+            result = {
+                "minerva": minerva_rows,
+                "archive_org": ao_candidates,
+                "match_info": match_info,
+            }
         except Exception as e:
             exc = e
 
-        # Emit results or error — the signals QObject may have been deleted
-        # during shutdown (RuntimeError), which we suppress gracefully.
         if exc is not None:
             _safe_emit(self.signals, "failed", str(exc))
         else:
-            _safe_emit(self.signals, "succeeded", results)
+            _safe_emit(self.signals, "succeeded", result)
         _safe_emit(self.signals, "finished")
 
 
@@ -153,7 +218,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
         # Cache DB instance — MinervaDB() opens a new SQLite connection each call
         from minerva_db import MinervaDB
         self._db = MinervaDB()
-        self._running_tasks: set[_ArchiveOrgSearchTask] = set()
+        self._running_tasks: set[_MatchSearchTask] = set()
 
         self.setObjectName("matchDetailPanel")
         self.setMinimumWidth(310)
@@ -179,27 +244,20 @@ class MatchDetailPanel(QtWidgets.QWidget):
         return self._generate_btn
 
     def show_entry(self, report_id: str, entry: ReviewEntry, system: str | None = None) -> None:
-        """Display match details for *entry* in *report_id*."""
+        """Display match details for *entry* in *report_id*.
+
+        Shows a placeholder immediately, then launches a single worker
+        thread that runs both the Minerva DB queries (match_dat_detailed,
+        get_file_regions, get_files_by_ids) and the archive.org search.
+        The UI never blocks on SQLite FTS5 or network I/O.
+        """
         self._current_report_id = report_id
         self._current_entry_id = entry.id
         self._current_system = system
         self._current_filename = entry.filename
-        # Build match info from cached DB instance
-        db = self._db
+        self._title_label.setText(entry.filename)
 
-        match_name = "—"
-        match_region = "—"
-        match_source = "—"
-        match_size = "—"
-        if entry.automatic_file_id is not None:
-            items = db.get_files_by_ids([entry.automatic_file_id])
-            if items:
-                it = items[0]
-                match_name = it.basename
-                match_region = ", ".join(it.regions) if it.regions else "—"
-                match_source = it.source_torrent or "—"
-                match_size = f"{it.size / 1024 / 1024:.1f} MB"
-
+        # Show static fields immediately from entry data (no DB access needed)
         size_str = f"{entry.size / 1024 / 1024:.1f} MB" if entry.size else "—"
         method = entry.automatic_method or "none"
         confidence = f"{entry.automatic_confidence:.0%}" if entry.automatic_confidence is not None else "—"
@@ -210,26 +268,47 @@ class MatchDetailPanel(QtWidgets.QWidget):
             f"<tr><td><b>Decision</b></td><td>{entry.decision}</td></tr>"
             f"<tr><td><b>Method</b></td><td>{method}</td></tr>"
             f"<tr><td><b>Confidence</b></td><td>{confidence}</td></tr>"
-            f"<tr><td><b>Matched file</b></td><td>{match_name}</td></tr>"
-            f"<tr><td><b>Region</b></td><td>{match_region}</td></tr>"
-            f"<tr><td><b>Source</b></td><td>{match_source}</td></tr>"
             f"<tr><td><b>Requested size</b></td><td>{size_str}</td></tr>"
-            f"<tr><td><b>Actual size</b></td><td>{match_size}</td></tr>"
             f"</table>"
         )
-
-        # Build Minerva candidates synchronously
-        candidates_html = self._build_minerva_candidates_html(db, entry, system)
-        placeholder = candidates_html + '<br><span style="color:#888;">Searching archive.org...</span>'
-        self._candidates_detail.setText(placeholder)
-
-        # Launch async archive.org search
-        dat = DatEntry(filename=entry.filename, size=entry.size)
-        scope_system = system or ""
-        self._fetch_archive_org_candidates(dat, scope_system, candidates_html)
-
+        self._candidates_detail.setText(
+            '<span style="color:#888;">Searching...</span>'
+        )
         self._approve_btn.setEnabled(True)
         self._ignore_btn.setEnabled(True)
+
+        # Launch combined search on a worker thread
+        dat = DatEntry(filename=entry.filename, size=entry.size)
+        scope_system = system or ""
+        task = _MatchSearchTask(
+            self._db, self._archive_org_provider, dat, scope_system,
+            entry.automatic_file_id,
+        )
+        entry_id = entry.id
+        automatic_file_id = entry.automatic_file_id
+
+        def on_succeeded(result: object) -> None:
+            # Ignore stale results if the user selected a different entry
+            if self._current_entry_id != entry_id:
+                return
+            payload = dict(result) if result else {}
+            self._render_match_results(payload, automatic_file_id, size_str)
+
+        def on_failed(msg: str) -> None:
+            if self._current_entry_id != entry_id:
+                return
+            self._candidates_detail.setText(
+                f'<span style="color:#c00;">Search failed: {html_mod.escape(msg)}</span>'
+            )
+
+        def cleanup() -> None:
+            self._running_tasks.discard(task)
+
+        task.signals.succeeded.connect(on_succeeded)
+        task.signals.failed.connect(on_failed)
+        task.signals.finished.connect(cleanup)
+        self._running_tasks.add(task)
+        QtCore.QThreadPool.globalInstance().start(task)
 
     def clear(self) -> None:
         """Clear the panel — no entry selected."""
@@ -243,6 +322,83 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._approve_btn.setEnabled(False)
         self._ignore_btn.setEnabled(False)
 
+    def _render_match_results(
+        self, payload: dict, automatic_file_id: int | None, size_str: str,
+    ) -> None:
+        """Render the combined Minerva + archive.org results on the UI thread."""
+        # ── Comparison table (enriched with DB lookups) ──
+        match_name = "—"
+        match_region = "—"
+        match_source = "—"
+        match_size = "—"
+        match_info = payload.get("match_info") or {}
+        if match_info:
+            match_name = html_mod.escape(match_info.get("basename", "—"))
+            regions = match_info.get("regions") or ()
+            match_region = ", ".join(regions) if regions else "—"
+            match_source = html_mod.escape(str(match_info.get("source_torrent") or "—"))
+            sz = match_info.get("size") or 0
+            match_size = f"{sz / 1024 / 1024:.1f} MB" if sz else "—"
+
+        self._comparison_detail.setText(
+            f"<table cellpadding='2'>"
+            f"<tr><td><b>Matched file</b></td><td>{match_name}</td></tr>"
+            f"<tr><td><b>Region</b></td><td>{match_region}</td></tr>"
+            f"<tr><td><b>Source</b></td><td>{match_source}</td></tr>"
+            f"<tr><td><b>Requested size</b></td><td>{size_str}</td></tr>"
+            f"<tr><td><b>Actual size</b></td><td>{match_size}</td></tr>"
+            f"</table>"
+        )
+
+        # ── Candidates table ──
+        minerva_rows = payload.get("minerva") or []
+        ao_candidates = payload.get("archive_org") or []
+
+        if not minerva_rows and not ao_candidates:
+            self._candidates_detail.setText("No candidates found")
+            return
+
+        rows_html: list[str] = []
+        for c in minerva_rows:
+            fid = c["file_id"]
+            conf = c.get("confidence", 0)
+            method = c.get("method", "?")
+            title = html_mod.escape(str(c.get("title", "—"))[:50])
+            regions = c.get("regions") or []
+            region_str = ", ".join(regions) if regions else "—"
+            is_selected = fid == automatic_file_id
+            marker = "▶ " if is_selected else "  "
+            conf_str = f"{conf:.0%}"
+            style = "font-weight:bold;" if is_selected else ""
+            badge = _source_badge(DownloadSource.MINERVA_TORRENT)
+            rows_html.append(
+                f"<tr style='{style}'><td>{marker}</td>"
+                f"<td>{title}</td><td>{conf_str}</td>"
+                f"<td>{html_mod.escape(str(method))}</td><td>{html_mod.escape(region_str)}</td>"
+                f"<td>{badge}</td></tr>"
+            )
+
+        for ac in ao_candidates[:5]:
+            conf_str = f"{ac.confidence:.0%}"
+            title = html_mod.escape(ac.title[:50])
+            source_badge_html = _source_badge(ac.source)
+            seeders = str(ac.seeders) if ac.seeders is not None else "—"
+            href_val = f"archive_org:{ac.source.value}:{quote(ac.source_ref, safe='')}"
+            method = html_mod.escape(str(ac.method))
+            rows_html.append(
+                f"<tr><td>  </td>"
+                f'<td><a href="{href_val}" style="color:#4a9eff;text-decoration:none;">{title}</a></td>'
+                f"<td>{conf_str}</td>"
+                f"<td>{method}</td><td>{seeders}</td>"
+                f"<td>{source_badge_html}</td></tr>"
+            )
+
+        self._candidates_detail.setText(
+            "<table cellpadding='2' width='100%'>"
+            "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
+            "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
+            + "".join(rows_html) + "</table>"
+        )
     def approve_entry(self) -> None:
         """Approve the current entry — emit decision_changed with 'accept'."""
         if self._current_report_id and self._current_entry_id:
@@ -411,99 +567,6 @@ class MatchDetailPanel(QtWidgets.QWidget):
 
         root.addStretch(1)
 
-    # ── Candidates helper ──────────────────────────────────────────────────
-
-    def _build_minerva_candidates_html(self, db, entry: ReviewEntry, system: str | None) -> str:
-        """Build HTML showing top Minerva match candidates (sync)."""
-        dat = DatEntry(filename=entry.filename, size=entry.size)
-        scope_system = system or ""
-        results = db.match_dat_detailed([dat], collection="", system=scope_system, candidate_limit=5)
-
-        if not results.get("results"):
-            return "No candidates found"
-
-        candidates = results["results"][0].get("candidates", [])
-        if not candidates:
-            return "No candidates found"
-
-        # Get regions for all candidates
-        file_ids = [c["file_id"] for c in candidates]
-        regions_map = db.get_file_regions(file_ids)
-
-        rows = []
-        for c in candidates:
-            fid = c["file_id"]
-            conf = c.get("confidence", 0)
-            method = c.get("method", "?")
-            title = c.get("title", "—")
-            regions = regions_map.get(fid, [])
-            region_str = ", ".join(regions) if regions else "—"
-            is_selected = fid == entry.automatic_file_id
-            marker = "▶ " if is_selected else "  "
-            conf_str = f"{conf:.0%}"
-            style = "font-weight:bold;" if is_selected else ""
-            rows.append(
-                f"<tr style='{style}'><td>{marker}</td>"
-                f"<td>{title[:50]}</td><td>{conf_str}</td>"
-                f"<td>{method}</td><td>{region_str}</td>"
-                f"<td>{_source_badge(DownloadSource.MINERVA_TORRENT)}</td></tr>"
-            )
-
-
-        return (
-            "<table cellpadding='2' width='100%'>"
-        "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
-        "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
-            + "".join(rows) + "</table>"
-        )
-
-    def _fetch_archive_org_candidates(
-        self, dat: object, system: str, minerva_html: str
-    ) -> None:
-        """Fetch archive.org candidates in a worker thread."""
-        task = _ArchiveOrgSearchTask(self._archive_org_provider, dat, system)
-
-        def on_succeeded(candidates: object) -> None:
-            candidates_list = list(candidates) if candidates else []
-            if not candidates_list:
-                self._candidates_detail.setText(minerva_html)
-                return
-
-            rows = []
-            for ac in candidates_list:
-                conf_str = f"{ac.confidence:.0%}"
-                title = html_mod.escape(ac.title[:50])
-                source_badge_html = _source_badge(ac.source)
-                seeders = str(ac.seeders) if ac.seeders is not None else "\u2014"
-                # URL-encode source_ref to safely embed in href
-                href_val = f"archive_org:{ac.source.value}:{quote(ac.source_ref, safe='')}"
-                method = html_mod.escape(str(ac.method))
-                rows.append(
-                    f"<tr><td>  </td>"
-                    f'<td><a href="{href_val}" style="color:#4a9eff;text-decoration:none;">{title}</a></td>'
-                    f"<td>{conf_str}</td>"
-                    f"<td>{method}</td><td>{seeders}</td>"
-                    f"<td>{source_badge_html}</td></tr>"
-                )
-
-            # Replace the closing </table> with new rows + closing tag
-            merged = minerva_html.removesuffix("</table>") + "".join(rows) + "</table>"
-            self._candidates_detail.setText(merged)
-
-        def on_failed(msg: str) -> None:
-            log.debug("Archive.org candidate fetch failed: %s", msg)
-            self._candidates_detail.setText(
-                minerva_html + '<br><span style="color:#888;">Archive.org unavailable</span>'
-            )
-
-        def cleanup() -> None:
-            self._running_tasks.discard(task)
-
-        task.signals.succeeded.connect(on_succeeded)
-        task.signals.failed.connect(on_failed)
-        task.signals.finished.connect(cleanup)
-        self._running_tasks.add(task)
-        QtCore.QThreadPool.globalInstance().start(task)
 
     def _on_link_activated(self, url: str) -> None:
         """Handle clicks on candidate links — emit archive_org_candidate_selected."""

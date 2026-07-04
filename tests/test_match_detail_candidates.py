@@ -31,27 +31,21 @@ def test_candidate_source_badge_archive_http():
     assert "http" in badge.lower() or "⬇" in badge
 
 
-def test_build_minerva_candidates_html_exists():
-    """_build_minerva_candidates_html method exists on MatchDetailPanel."""
+def test_render_match_results_exists():
+    """_render_match_results method exists on MatchDetailPanel."""
     from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
 
-    assert hasattr(MatchDetailPanel, "_build_minerva_candidates_html")
-    assert callable(MatchDetailPanel._build_minerva_candidates_html)
+    assert hasattr(MatchDetailPanel, "_render_match_results")
+    assert callable(MatchDetailPanel._render_match_results)
 
 
-def test_fetch_archive_org_candidates_exists():
-    """_fetch_archive_org_candidates method exists on MatchDetailPanel."""
-    from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
-
-    assert hasattr(MatchDetailPanel, "_fetch_archive_org_candidates")
-    assert callable(MatchDetailPanel._fetch_archive_org_candidates)
-
-def test_archive_org_search_task_class(qtbot):
-    """_ArchiveOrgSearchTask is a QRunnable that can be instantiated."""
-    from minerva.ui.widgets.match_detail_panel import _ArchiveOrgSearchTask, _TaskSignals
+def test_match_search_task_class(qtbot):
+    """_MatchSearchTask is a QRunnable that can be instantiated."""
     from unittest.mock import MagicMock
 
-    task = _ArchiveOrgSearchTask(MagicMock(), MagicMock(), "")
+    from minerva.ui.widgets.match_detail_panel import _MatchSearchTask, _TaskSignals
+
+    task = _MatchSearchTask(MagicMock(), MagicMock(), MagicMock(), "", None)
     assert isinstance(task.signals, _TaskSignals)
 
 def test_task_signals_class():
@@ -66,8 +60,9 @@ def test_task_signals_class():
 def test_archive_org_provider_initialized(qtbot):
     """MatchDetailPanel initializes _archive_org_provider."""
     from unittest.mock import MagicMock
-    from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
+
     from minerva.app.app_state import AppState
+    from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
 
     app_state = MagicMock(spec=AppState)
     panel = MatchDetailPanel(app_state)
