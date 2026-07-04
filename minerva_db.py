@@ -1095,6 +1095,7 @@ class MinervaDB:
         _ensure_parent_dir(self._path)
         c = sqlite3.connect(self._path)
         c.row_factory = sqlite3.Row
+        c.execute("PRAGMA busy_timeout = 5000")
         c.execute("PRAGMA mmap_size = 268435456")
         c.execute("PRAGMA temp_store = MEMORY")
         c.execute("PRAGMA cache_size = -8000000")
@@ -1611,6 +1612,42 @@ class MinervaDB:
             collection=row["collection"],
             system=row["system"],
         )
+
+    def get_download_specs_batch(
+        self,
+        file_ids: list[int],
+        torrent_dir: Path = DEFAULT_TORRENT_DIR,
+    ) -> dict[int, "DownloadFileSpec"]:
+        """Resolve multiple file IDs in a single DB query.
+
+        Returns a dict mapping file_id → DownloadFileSpec. Missing IDs are
+        omitted. Avoids N separate connection/query overheads.
+        """
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        if not file_ids:
+            return {}
+        with self.conn() as c:
+            ids = sorted(set(file_ids))
+            placeholders = ",".join("?" * len(ids))
+            rows = c.execute(
+                f"SELECT * FROM files WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {
+            row["id"]: DownloadFileSpec(
+                file_id=row["id"],
+                torrent_name=row["torrent"],
+                torrent_path=torrent_dir / row["torrent"],
+                select_index=row["select_idx"],
+                basename=row["basename"],
+                path_in_torrent=row["path_full"],
+                size=row["size"],
+                collection=row["collection"],
+                system=row["system"],
+            )
+            for row in rows
+        }
 
     # ── Typed query API ───────────────────────────────────────────────────
 

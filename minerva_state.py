@@ -313,6 +313,7 @@ class MinervaState:
         _connect: bool = True,
     ) -> None:
         self._path = str(db_path)
+        self._migrations_done = False
         if _connect:
             self.connect()
 
@@ -366,17 +367,19 @@ class MinervaState:
         c.row_factory = sqlite3.Row
         c.execute("PRAGMA journal_mode = WAL")
         c.execute("PRAGMA foreign_keys = ON")
+        c.execute("PRAGMA busy_timeout = 5000")
         c.execute("PRAGMA cache_size = -4000000")
         c.execute("PRAGMA temp_store = MEMORY")
         if not self._is_schema_applied(c):
             c.executescript(SCHEMA_SQL)
+        # Only run migrations on the first connection — subsequent
+        # connections skip the migration logic entirely to avoid
+        # acquiring write locks on every DB operation.
+        if not self._migrations_done:
             self._migrate_legacy_columns(c)
             self._migrate_add_source_columns(c)
             self._migrate_add_entry_source_columns(c)
-        else:
-            self._migrate_legacy_columns(c)
-            self._migrate_add_source_columns(c)
-            self._migrate_add_entry_source_columns(c)
+            self._migrations_done = True
         return c
 
     def _apply_schema(self) -> None:
@@ -397,6 +400,10 @@ class MinervaState:
         For fresh DBs the canonical columns are already part of the schema;
         the ALTER statements are skipped.  For pre-migration DBs the columns
         are added and data is copied from the legacy names.
+
+        The data-copy UPDATEs are idempotent but acquire write locks, so we
+        skip them entirely once the migration is marked complete (via the
+        ``schema_migrations`` table).
         """
         existing = {r[1] for r in c.execute("PRAGMA table_info(reports)").fetchall()}
         if "ready_count" not in existing:
@@ -405,7 +412,15 @@ class MinervaState:
             c.execute("ALTER TABLE reports ADD COLUMN review_required_count INTEGER NOT NULL DEFAULT 0")
         if "not_found_count" not in existing:
             c.execute("ALTER TABLE reports ADD COLUMN not_found_count INTEGER NOT NULL DEFAULT 0")
-        # Copy legacy data into canonical columns where not yet done
+        # Skip the data-copy UPDATEs if this migration already ran.
+        # The UPDATEs are idempotent but acquire write locks on every
+        # connection, causing "database is locked" under contention.
+        c.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY)")
+        done = c.execute(
+            "SELECT 1 FROM schema_migrations WHERE name = 'legacy_columns'"
+        ).fetchone()
+        if done:
+            return
         c.execute(
             "UPDATE reports SET ready_count = matched_count "
             "WHERE ready_count = 0 AND matched_count > 0"
@@ -418,6 +433,7 @@ class MinervaState:
             "UPDATE reports SET not_found_count = unmatched_count "
             "WHERE not_found_count = 0 AND unmatched_count > 0"
         )
+        c.execute("INSERT OR IGNORE INTO schema_migrations VALUES ('legacy_columns')")
 
     def _migrate_add_source_columns(self, c: sqlite3.Connection) -> None:
         """Add source and source_ref columns to download_queue for existing DBs."""

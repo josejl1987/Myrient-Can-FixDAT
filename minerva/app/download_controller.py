@@ -545,7 +545,24 @@ class DownloadController(QtCore.QObject):
         """Handle qBittorrent connection state changes."""
         self._app_state.qbit_state = bool(connected)
         if connected:
+            # Defer reconcile to the thread pool so it doesn't block
+            # the UI thread. Reconcile resolves file specs (opening the
+            # 1.5 GB torrent index DB) and writes to the state DB, which
+            # can freeze the event loop for several seconds if run inline.
+            QtCore.QTimer.singleShot(0, self._reconcile_async)
+
+    def _reconcile_async(self) -> None:
+        """Run reconcile in the thread pool to avoid blocking the UI."""
+        def operation() -> None:
             self.reconcile()
+
+        def succeeded(_result: object) -> None:
+            self._emit_changed()
+
+        def failed(message: str) -> None:
+            log.warning("Reconcile failed: %s", message)
+
+        self._run_task(operation, succeeded, failed)
 
     # ── Snapshot reconciliation ──────────────────────────────────────────
 
