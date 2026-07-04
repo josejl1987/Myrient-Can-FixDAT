@@ -160,10 +160,29 @@ class _MatchSearchTask(QtCore.QRunnable):
                         "size": it.size,
                     }
 
-            # ── Archive.org candidates (network call, off UI thread) ──
-            try:
-                ao_candidates = self._provider.search(self._dat, self._system)
-            except Exception:
+            # ── Archive.org candidates (network call with 8s timeout) ──
+            # The internetarchive library has no built-in timeout — wrap it
+            # in a sub-thread with a join deadline so a hung network call
+            # doesn't block the thread pool forever.
+            import threading as _threading
+            ao_candidates: list = []
+            ao_error: Exception | None = None
+
+            def _run_archive_search() -> None:
+                nonlocal ao_candidates, ao_error
+                try:
+                    ao_candidates = self._provider.search(self._dat, self._system)
+                except Exception as e:
+                    ao_error = e
+
+            ao_thread = _threading.Thread(target=_run_archive_search, daemon=True)
+            ao_thread.start()
+            ao_thread.join(timeout=8.0)
+            if ao_thread.is_alive():
+                log.warning("Archive.org search timed out after 8s — skipping")
+                ao_candidates = []
+            elif ao_error is not None:
+                log.debug("Archive.org search failed: %s", ao_error)
                 ao_candidates = []
 
             result = {
