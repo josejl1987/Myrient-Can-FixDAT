@@ -226,6 +226,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
     decision_changed = QtCore.pyqtSignal(str, str, str)  # report_id, entry_id, decision
     bulk_decision_requested = QtCore.pyqtSignal(str, str, int)  # report_id, filter_type, threshold
     archive_org_candidate_selected = QtCore.pyqtSignal(str, str, str, str)  # report_id, entry_id, source, source_ref
+    minerva_candidate_selected = QtCore.pyqtSignal(str, str, int)  # report_id, entry_id, file_id
 
     def __init__(
         self,
@@ -355,11 +356,32 @@ class MatchDetailPanel(QtWidgets.QWidget):
     ) -> None:
         """Render the combined Minerva + archive.org results on the UI thread."""
         # ── Comparison table (enriched with DB lookups) ──
+        match_info = payload.get("match_info") or {}
+        minerva_rows = payload.get("minerva") or []
+
+        # If there's no automatic match but Minerva found a top candidate,
+        # use it as the effective match so the comparison table shows real data
+        # and the "Approve" button has a file_id to work with.
+        if not match_info and minerva_rows:
+            top = minerva_rows[0]
+            match_info = {
+                "basename": top.get("title", "—"),
+                "regions": top.get("regions", []),
+                "source_torrent": "Minerva index",
+                "size": 0,
+            }
+            # Auto-select the top candidate if not already selected
+            top_fid = top["file_id"]
+            if automatic_file_id is None and self._current_report_id and self._current_entry_id:
+                self.minerva_candidate_selected.emit(
+                    self._current_report_id, self._current_entry_id, top_fid
+                )
+
+        # Fill comparison table from match_info
         match_name = "—"
         match_region = "—"
         match_source = "—"
         match_size = "—"
-        match_info = payload.get("match_info") or {}
         if match_info:
             match_name = html_mod.escape(match_info.get("basename", "—"))
             regions = match_info.get("regions") or ()
@@ -379,7 +401,6 @@ class MatchDetailPanel(QtWidgets.QWidget):
         )
 
         # ── Candidates table ──
-        minerva_rows = payload.get("minerva") or []
         ao_candidates = payload.get("archive_org") or []
         ao_status = payload.get("archive_org_status", "ok")
 
@@ -533,13 +554,6 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._cdr_btn.clicked.connect(self._on_cdromance)
         action_row.addWidget(self._cdr_btn)
 
-        self._archive_btn = QtWidgets.QPushButton("archive.org")
-        self._archive_btn.setObjectName("secondaryButton")
-        self._archive_btn.setFixedHeight(32)
-        self._archive_btn.setToolTip("Search archive.org in your browser")
-        self._archive_btn.clicked.connect(self._on_archive_org_browse)
-        action_row.addWidget(self._archive_btn)
-
         action_row.addStretch(1)
         root.addLayout(action_row)
 
@@ -647,24 +661,4 @@ class MatchDetailPanel(QtWidgets.QWidget):
             search_name,
             self._current_system,
         )
-        webbrowser.open(url)
-
-
-    def _on_archive_org_browse(self) -> None:
-        """Open archive.org search in the browser.
-
-        Builds a search URL using the cleaned game title and opens it in
-        the system browser. This is an alternative to the in-app archive.org
-        candidate matching — for manual exploration.
-        """
-        if self._current_entry_id is None:
-            return
-        from minerva_db import core_title, stem_from_romname
-        search_name = getattr(self, "_current_filename", None) or self._current_entry_id
-        title = core_title(stem_from_romname(search_name))
-        if title:
-            from urllib.parse import quote
-            url = f"https://archive.org/search?query={quote(title)}&and[]=mediatype:data"
-        else:
-            url = "https://archive.org/search?query=roms"
         webbrowser.open(url)

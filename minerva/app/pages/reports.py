@@ -355,6 +355,7 @@ class ReportsPage(BasePage):
         self._match_detail.decision_changed.connect(self._on_decision_changed)
         self._match_detail.bulk_decision_requested.connect(self._on_bulk_decision)
         self._match_detail.archive_org_candidate_selected.connect(self._on_archive_org_candidate_selected)
+        self._match_detail.minerva_candidate_selected.connect(self._on_minerva_candidate_selected)
 
         # Queue approved button — single action replacing dual queue mechanisms
         self._queue_approved_btn = QtWidgets.QPushButton("Queue approved")
@@ -586,6 +587,7 @@ class ReportsPage(BasePage):
         finally:
             self._updating = False
 
+
     def _check_review_complete(self, report_id: str) -> None:
         """Show actionable toast when all entries in a report have been reviewed."""
         try:
@@ -604,6 +606,19 @@ class ReportsPage(BasePage):
                     )
         except Exception:
             log.warning("Failed to check review completion", exc_info=True)
+
+
+    def _on_minerva_candidate_selected(
+        self, report_id: str, entry_id: str, file_id: int
+    ) -> None:
+        """Auto-select a Minerva candidate as the entry's match."""
+        try:
+            MinervaState().set_entry_decision(
+                report_id, entry_id, "pending",
+                selected_file_id=file_id,
+            )
+        except Exception:
+            log.warning("Failed to auto-select Minerva candidate", exc_info=True)
 
     # ── Keyboard shortcut handlers ──────────────────────────────────────
 
