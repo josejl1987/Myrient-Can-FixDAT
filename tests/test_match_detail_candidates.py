@@ -67,3 +67,30 @@ def test_archive_org_provider_initialized(qtbot):
     app_state = MagicMock(spec=AppState)
     panel = MatchDetailPanel(app_state)
     assert panel._archive_org_provider is not None
+
+
+def test_render_match_results_shows_archive_org_unavailable(qtbot):
+    """When archive_org_status is error/timeout, a footer label is shown."""
+    from unittest.mock import MagicMock
+
+    from minerva.app.app_state import AppState
+    from minerva.ui.widgets.match_detail_panel import MatchDetailPanel
+
+    app_state = MagicMock(spec=AppState)
+    panel = MatchDetailPanel(app_state)
+
+    panel._render_match_results(
+        {"minerva": [], "archive_org": [], "archive_org_status": "timeout"},
+        None,
+        "10 KB",
+    )
+    text = panel._candidates_detail.text()
+    assert "Archive.org timed out" in text
+
+    panel._render_match_results(
+        {"minerva": [], "archive_org": [], "archive_org_status": "error"},
+        None,
+        "10 KB",
+    )
+    text = panel._candidates_detail.text()
+    assert "Archive.org unavailable" in text

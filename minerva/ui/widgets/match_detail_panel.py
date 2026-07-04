@@ -380,7 +380,12 @@ class MatchDetailPanel(QtWidgets.QWidget):
         ao_status = payload.get("archive_org_status", "ok")
 
         if not minerva_rows and not ao_candidates:
-            self._candidates_detail.setText("No candidates found")
+            message = "No candidates found"
+            if ao_status == "timeout":
+                message += "\nArchive.org timed out"
+            elif ao_status == "error":
+                message += "\nArchive.org unavailable"
+            self._candidates_detail.setText(message)
             return
 
         rows_html: list[str] = []
