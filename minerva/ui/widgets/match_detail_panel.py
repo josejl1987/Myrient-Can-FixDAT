@@ -296,7 +296,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
             f"</table>"
         )
         self._candidates_detail.setText(
-            '<span style="color:#888;">Searching...</span>'
+            '<span style="color:#888;">Searching Minerva index and archive.org...</span>'
         )
         self._approve_btn.setEnabled(True)
         self._ignore_btn.setEnabled(True)
@@ -341,8 +341,12 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._current_system = None
         self._current_filename = None
         self._title_label.setText("Select an entry to review")
-        self._comparison_detail.setText("No entry selected")
-        self._candidates_detail.setText("No entry selected")
+        self._comparison_detail.setText(
+            '<span style="color:#888;">No entry selected</span>'
+        )
+        self._candidates_detail.setText(
+            '<span style="color:#888;">No entry selected</span>'
+        )
         self._approve_btn.setEnabled(False)
         self._ignore_btn.setEnabled(False)
 
@@ -427,6 +431,12 @@ class MatchDetailPanel(QtWidgets.QWidget):
         if ao_status != "ok" and not ao_candidates:
             status_label = "Archive.org unavailable" if ao_status == "error" else "Archive.org timed out"
             status_footer = f"<tr><td></td><td colspan='5' style='color:#888;'>{status_label}</td></tr>"
+        elif ao_candidates:
+            status_footer = (
+                "<tr><td></td><td colspan='5' style='color:#888;font-size:10px;'>"
+                "Click an archive.org link to select it as the download source"
+                "</td></tr>"
+            )
 
         self._candidates_detail.setText(
             "<table cellpadding='2' width='100%'>"
@@ -522,6 +532,13 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._cdr_btn.setFixedHeight(32)
         self._cdr_btn.clicked.connect(self._on_cdromance)
         action_row.addWidget(self._cdr_btn)
+
+        self._archive_btn = QtWidgets.QPushButton("archive.org")
+        self._archive_btn.setObjectName("secondaryButton")
+        self._archive_btn.setFixedHeight(32)
+        self._archive_btn.setToolTip("Search archive.org in your browser")
+        self._archive_btn.clicked.connect(self._on_archive_org_browse)
+        action_row.addWidget(self._archive_btn)
 
         action_row.addStretch(1)
         root.addLayout(action_row)
@@ -630,4 +647,24 @@ class MatchDetailPanel(QtWidgets.QWidget):
             search_name,
             self._current_system,
         )
+        webbrowser.open(url)
+
+
+    def _on_archive_org_browse(self) -> None:
+        """Open archive.org search in the browser.
+
+        Builds a search URL using the cleaned game title and opens it in
+        the system browser. This is an alternative to the in-app archive.org
+        candidate matching — for manual exploration.
+        """
+        if self._current_entry_id is None:
+            return
+        from minerva_db import core_title, stem_from_romname
+        search_name = getattr(self, "_current_filename", None) or self._current_entry_id
+        title = core_title(stem_from_romname(search_name))
+        if title:
+            from urllib.parse import quote
+            url = f"https://archive.org/search?query={quote(title)}&and[]=mediatype:data"
+        else:
+            url = "https://archive.org/search?query=roms"
         webbrowser.open(url)
