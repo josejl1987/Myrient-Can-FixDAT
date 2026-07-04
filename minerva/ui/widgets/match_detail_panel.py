@@ -167,6 +167,7 @@ class _MatchSearchTask(QtCore.QRunnable):
             import threading as _threading
             ao_candidates: list = []
             ao_error: Exception | None = None
+            ao_status: str = "ok"
 
             def _run_archive_search() -> None:
                 nonlocal ao_candidates, ao_error
@@ -180,16 +181,20 @@ class _MatchSearchTask(QtCore.QRunnable):
             ao_thread.join(timeout=8.0)
             if ao_thread.is_alive():
                 log.warning("Archive.org search timed out after 8s — skipping")
+                ao_status = "timeout"
                 ao_candidates = []
             elif ao_error is not None:
                 log.debug("Archive.org search failed: %s", ao_error)
+                ao_status = "error"
                 ao_candidates = []
 
             result = {
                 "minerva": minerva_rows,
                 "archive_org": ao_candidates,
+                "archive_org_status": ao_status,
                 "match_info": match_info,
             }
+
         except Exception as e:
             exc = e
 
@@ -372,6 +377,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
         # ── Candidates table ──
         minerva_rows = payload.get("minerva") or []
         ao_candidates = payload.get("archive_org") or []
+        ao_status = payload.get("archive_org_status", "ok")
 
         if not minerva_rows and not ao_candidates:
             self._candidates_detail.setText("No candidates found")
@@ -402,7 +408,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
             title = html_mod.escape(ac.title[:50])
             source_badge_html = _source_badge(ac.source)
             seeders = str(ac.seeders) if ac.seeders is not None else "—"
-            href_val = f"archive_org:{ac.source.value}:{quote(ac.source_ref, safe='')}"
+            href_val = f"archive_org:{ac.source.value}:{quote(ac.source_ref, safe='')}".replace('"', '%22')
             method = html_mod.escape(str(ac.method))
             rows_html.append(
                 f"<tr><td>  </td>"
@@ -412,12 +418,18 @@ class MatchDetailPanel(QtWidgets.QWidget):
                 f"<td>{source_badge_html}</td></tr>"
             )
 
+        status_footer = ""
+        if ao_status != "ok" and not ao_candidates:
+            status_label = "Archive.org unavailable" if ao_status == "error" else "Archive.org timed out"
+            status_footer = f"<tr><td></td><td colspan='5' style='color:#888;'>{status_label}</td></tr>"
+
         self._candidates_detail.setText(
             "<table cellpadding='2' width='100%'>"
             "<tr><td></td><td><b>Title</b></td><td><b>Conf</b></td>"
             "<td><b>Method</b></td><td><b>Region</b></td><td><b>Source</b></td></tr>"
-            + "".join(rows_html) + "</table>"
+            + "".join(rows_html) + status_footer + "</table>"
         )
+
     def approve_entry(self) -> None:
         """Approve the current entry — emit decision_changed with 'accept'."""
         if self._current_report_id and self._current_entry_id:
