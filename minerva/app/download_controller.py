@@ -540,10 +540,10 @@ class DownloadController(QtCore.QObject):
                     self._schedule_record_submission(record)
         self._sync_monitor_hashes()
 
-    @QtCore.pyqtSlot(bool)
-    def _on_connection_changed(self, connected: bool) -> None:
+    @QtCore.pyqtSlot(object)
+    def _on_connection_changed(self, connected: object) -> None:
         """Handle qBittorrent connection state changes."""
-        self._app_state.qbit_state = connected
+        self._app_state.qbit_state = bool(connected)
         if connected:
             self.reconcile()
 
