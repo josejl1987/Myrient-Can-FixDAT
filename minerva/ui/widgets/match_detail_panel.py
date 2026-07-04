@@ -9,9 +9,10 @@ Occupies the inspector slot in the ResponsiveWorkspace 3-zone layout.
 
 from __future__ import annotations
 
+import html as html_mod
 import logging
 import webbrowser
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from PyQt6 import QtCore, QtWidgets
 
@@ -20,6 +21,7 @@ from minerva.domain.reports import ReviewEntry
 from minerva.domain.sources import DownloadSource
 from minerva.services.archive_org import ArchiveOrgCandidateProvider
 from minerva.ui.icons import Icons
+from minerva_db import DatEntry
 
 log = logging.getLogger(__name__)
 
@@ -147,8 +149,10 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._current_entry_id: str | None = None
         self._current_system: str | None = None
         self._current_filename: str | None = None
-        self._threshold_value = 95
         self._archive_org_provider = ArchiveOrgCandidateProvider()
+        # Cache DB instance — MinervaDB() opens a new SQLite connection each call
+        from minerva_db import MinervaDB
+        self._db = MinervaDB()
         self._running_tasks: set[_ArchiveOrgSearchTask] = set()
 
         self.setObjectName("matchDetailPanel")
@@ -180,11 +184,8 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._current_entry_id = entry.id
         self._current_system = system
         self._current_filename = entry.filename
-        self._title_label.setText(entry.filename)
-
-        # Build match info from DB lookup
-        from minerva_db import MinervaDB
-        db = MinervaDB()
+        # Build match info from cached DB instance
+        db = self._db
 
         match_name = "—"
         match_region = "—"
@@ -223,7 +224,6 @@ class MatchDetailPanel(QtWidgets.QWidget):
         self._candidates_detail.setText(placeholder)
 
         # Launch async archive.org search
-        from minerva_db import DatEntry
         dat = DatEntry(filename=entry.filename, size=entry.size)
         scope_system = system or ""
         self._fetch_archive_org_candidates(dat, scope_system, candidates_html)
@@ -415,8 +415,6 @@ class MatchDetailPanel(QtWidgets.QWidget):
 
     def _build_minerva_candidates_html(self, db, entry: ReviewEntry, system: str | None) -> str:
         """Build HTML showing top Minerva match candidates (sync)."""
-        from minerva_db import DatEntry
-
         dat = DatEntry(filename=entry.filename, size=entry.size)
         scope_system = system or ""
         results = db.match_dat_detailed([dat], collection="", system=scope_system, candidate_limit=5)
@@ -474,20 +472,23 @@ class MatchDetailPanel(QtWidgets.QWidget):
             rows = []
             for ac in candidates_list:
                 conf_str = f"{ac.confidence:.0%}"
-                title = ac.title[:50]
+                title = html_mod.escape(ac.title[:50])
                 source_badge_html = _source_badge(ac.source)
                 seeders = str(ac.seeders) if ac.seeders is not None else "\u2014"
-                href_val = f"archive_org:{ac.source.value}:{ac.source_ref}"
+                # URL-encode source_ref to safely embed in href
+                href_val = f"archive_org:{ac.source.value}:{quote(ac.source_ref, safe='')}"
+                method = html_mod.escape(str(ac.method))
                 rows.append(
                     f"<tr><td>  </td>"
                     f'<td><a href="{href_val}" style="color:#4a9eff;text-decoration:none;">{title}</a></td>'
                     f"<td>{conf_str}</td>"
-                    f"<td>{ac.method}</td><td>{seeders}</td>"
+                    f"<td>{method}</td><td>{seeders}</td>"
                     f"<td>{source_badge_html}</td></tr>"
                 )
 
-            html = minerva_html.rstrip("</table>") + "".join(rows) + "</table>"
-            self._candidates_detail.setText(html)
+            # Replace the closing </table> with new rows + closing tag
+            merged = minerva_html.removesuffix("</table>") + "".join(rows) + "</table>"
+            self._candidates_detail.setText(merged)
 
         def on_failed(msg: str) -> None:
             log.debug("Archive.org candidate fetch failed: %s", msg)
@@ -507,10 +508,12 @@ class MatchDetailPanel(QtWidgets.QWidget):
     def _on_link_activated(self, url: str) -> None:
         """Handle clicks on candidate links — emit archive_org_candidate_selected."""
         if url.startswith("archive_org:"):
-            parts = url.split(":", 2)
-            if len(parts) == 3:
-                source = parts[1]
-                source_ref = parts[2]
+            rest = url[len("archive_org:"):]
+            # Split on first colon to separate source from source_ref
+            colon_idx = rest.find(":")
+            if colon_idx > 0:
+                source = rest[:colon_idx]
+                source_ref = unquote(rest[colon_idx + 1:])
                 if self._current_report_id and self._current_entry_id:
                     self.archive_org_candidate_selected.emit(
                         self._current_report_id, self._current_entry_id, source, source_ref
