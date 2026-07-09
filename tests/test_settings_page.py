@@ -11,6 +11,11 @@ from minerva.app.pages import SettingsPage
 from minerva.domain.settings import SettingsDraft
 
 
+def _make_app_state() -> AppState:
+    """Create an ``AppState`` for testing."""
+    return AppState()
+
+
 def test_page_constructs(qtbot):
     """GIVEN an AppState WHEN SettingsPage is constructed THEN no error."""
     page = SettingsPage(AppState())
@@ -68,3 +73,31 @@ def test_revert_discards_changes(qtbot):
     # Simulate revert via the cancel handler
     page._on_cancel()
     assert page._draft is not None
+
+
+def test_advanced_page_has_log_level_combo(qtbot):
+    """The Advanced page has a log level dropdown."""
+    app_state = _make_app_state()
+    page = SettingsPage(app_state)
+    qtbot.addWidget(page)
+    assert hasattr(page, "_log_level_combo")
+    assert page._log_level_combo.count() == 4  # DEBUG, INFO, WARNING, ERROR
+
+
+def test_advanced_page_has_open_log_button(qtbot):
+    """The Advanced page has an 'Open log file' button."""
+    app_state = _make_app_state()
+    page = SettingsPage(app_state)
+    qtbot.addWidget(page)
+    assert hasattr(page, "_open_log_btn")
+
+
+def test_log_level_persists_to_settings(qtbot, tmp_path, monkeypatch):
+    """Saving the log level writes it to QSettings."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    app_state = _make_app_state()
+    page = SettingsPage(app_state)
+    qtbot.addWidget(page)
+    page._log_level_combo.setCurrentIndex(0)  # DEBUG
+    page._on_save()
+    assert page._settings.value("log_level", "", str) == "DEBUG"

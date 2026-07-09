@@ -47,7 +47,7 @@ class SettingsPage(BasePage):
 
         self._header = PageHeader(
             "Settings",
-            "Configure downloads, indexing, qBittorrent, and application behavior.",
+            "Configure downloads, indexing, the native libtorrent engine, and application behavior.",
         )
 
         self._category_list = QtWidgets.QListWidget()
@@ -141,7 +141,7 @@ class SettingsPage(BasePage):
         card = SurfacePanel("Downloads", icon=Icons.download())
         form = QtWidgets.QFormLayout()
         self._download_method = QtWidgets.QComboBox()
-        self._download_method.addItem("qBittorrent", "qbit")
+        self._download_method.addItem("Native libtorrent", "native_libtorrent")
         form.addRow("Download method", self._download_method)
         self._output_picker = PathPicker("", parent=self)
         form.addRow("Output directory", self._output_picker)
@@ -250,6 +250,25 @@ class SettingsPage(BasePage):
     def _build_advanced_page(self) -> QtWidgets.QWidget:
         container = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(container)
+
+        # ── Logging card ─────────────────────────────────────────────
+        log_card = SurfacePanel("Logging", icon=Icons.status_warning())
+        log_form = QtWidgets.QFormLayout()
+        self._log_level_combo = QtWidgets.QComboBox()
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            self._log_level_combo.addItem(level, level)
+        log_form.addRow("Log level", self._log_level_combo)
+        self._log_path_label = QtWidgets.QLabel("")
+        self._log_path_label.setWordWrap(True)
+        self._log_path_label.setObjectName("logFilePath")
+        log_form.addRow("Log file", self._log_path_label)
+        self._open_log_btn = QtWidgets.QPushButton(Icons.folder_open(), "Open log file")
+        self._open_log_btn.clicked.connect(self._on_open_log_file)
+        log_form.addRow("", self._open_log_btn)
+        log_card.body_layout.addLayout(log_form)
+        layout.addWidget(log_card)
+
+        # ── Migration and diagnostics ────────────────────────────────
         card = SurfacePanel("Migration and diagnostics", icon=Icons.database())
         migrate = QtWidgets.QPushButton("Migrate legacy settings")
         migrate.clicked.connect(self._on_migrate_legacy)
@@ -261,14 +280,9 @@ class SettingsPage(BasePage):
         layout.addStretch(1)
         return self._scroll_page(container)
 
-    # ── Draft lifecycle ─────────────────────────────────────────────────
-
     def _load_draft(self) -> None:
         s = self._settings
         self._draft = SettingsDraft(
-            qbit_url=s.value("qbit_url", "http://localhost:8080", str),
-            qbit_username=s.value("qbit_user", "admin", str),
-            qbit_password=s.value("qbit_pass", "", str),
             output_directory=Path(s.value("output_dir", "downloads", str)),
             torrent_directory=Path(s.value("torrent_dir", "torrents/Minerva Myrient - 1050 torrents", str)),
             index_path=Path(s.value("index_path", "torrents/minerva_index.db", str)),
@@ -283,6 +297,7 @@ class SettingsPage(BasePage):
             density=Density(s.value(DENSITY_SETTINGS_KEY, Density.COMPACT.value, str)),
             theme=s.value("ui/theme", ThemeName.DARK, str),
             accent=s.value("ui/accent", AccentName.BLUE, str),
+            log_level=s.value("log_level", "INFO", str),
         )
 
     def _apply_draft_to_form(self) -> None:
@@ -303,6 +318,11 @@ class SettingsPage(BasePage):
         self._theme.setCurrentIndex(max(0, self._theme.findData(draft.theme)))
         self._accent.setCurrentIndex(max(0, self._accent.findData(draft.accent)))
         self._source_url.setText(self._settings.value("source_url", "", str))
+        idx = self._log_level_combo.findData(draft.log_level)
+        if idx >= 0:
+            self._log_level_combo.setCurrentIndex(idx)
+        from minerva.logging_config import get_log_file_path
+        self._log_path_label.setText(str(get_log_file_path()))
         self._loading = False
 
     def _form_to_draft(self) -> SettingsDraft:
@@ -321,6 +341,7 @@ class SettingsPage(BasePage):
             density=Density(self._density.currentData()),
             theme=self._theme.currentData(),
             accent=self._accent.currentData(),
+            log_level=self._log_level_combo.currentData(),
         )
 
     def _connect_dirty_signals(self) -> None:
@@ -334,6 +355,7 @@ class SettingsPage(BasePage):
             toggle.toggled.connect(self._on_form_changed)
         self._density.currentIndexChanged.connect(self._preview_appearance)
         self._accent.currentIndexChanged.connect(self._preview_appearance)
+        self._log_level_combo.currentIndexChanged.connect(self._on_form_changed)
 
     def _on_form_changed(self, *_args) -> None:
         if not self._loading:
@@ -344,14 +366,12 @@ class SettingsPage(BasePage):
         self._save_btn.setEnabled(dirty)
         self._cancel_btn.setEnabled(dirty)
         self._header.set_subtitle(
-            "Configure downloads, indexing, qBittorrent, and application behavior."
+            "Configure downloads, indexing, the native libtorrent engine, and application behavior."
             + ("  ·  Unsaved changes" if dirty else "")
         )
 
     def _validate(self, draft: SettingsDraft) -> list[str]:
         errors: list[str] = []
-        if not draft.qbit_url.startswith(("http://", "https://")):
-            errors.append("qBittorrent URL must start with http:// or https://")
         if not str(draft.torrent_directory):
             errors.append("Torrent source directory is required")
         if not str(draft.index_path):
@@ -366,9 +386,6 @@ class SettingsPage(BasePage):
     def _persist_draft(self) -> None:
         draft = self._draft
         values = {
-            "qbit_url": draft.qbit_url,
-            "qbit_user": draft.qbit_username,
-            "qbit_pass": draft.qbit_password,
             "output_dir": str(draft.output_directory),
             "torrent_dir": str(draft.torrent_directory),
             "index_path": str(draft.index_path),
@@ -384,10 +401,17 @@ class SettingsPage(BasePage):
             "ui/theme": draft.theme,
             "ui/accent": draft.accent,
             "source_url": self._source_url.text().strip(),
+            "log_level": draft.log_level,
         }
         for key, value in values.items():
             self._settings.setValue(key, value)
         self._settings.sync()
+
+        from minerva.logging_config import configure_logging
+        try:
+            configure_logging(draft.log_level)
+        except Exception:
+            pass
 
     def _on_save(self) -> None:
         draft = self._form_to_draft()
@@ -452,7 +476,7 @@ class SettingsPage(BasePage):
     def _on_migrate_legacy(self) -> None:
         old = QtCore.QSettings("MinervaFixDAT", "MinervaGUI")
         migrated = 0
-        for key in ("qbit_url", "qbit_user", "qbit_pass", "output_dir"):
+        for key in ("output_dir", "torrent_dir", "index_path", "cover_dir"):
             if old.contains(key):
                 self._settings.setValue(key, old.value(key))
                 migrated += 1
@@ -480,4 +504,13 @@ class SettingsPage(BasePage):
 
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(Path(self._settings.fileName()).parent)))
 
+    def _on_open_log_file(self) -> None:
+        from PyQt6 import QtGui
+        from minerva.logging_config import get_log_file_path
+
+        log_path = get_log_file_path()
+        if log_path.exists():
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(log_path)))
+        else:
+            NotificationBanner.show_warning(self, "Log file", "No log file exists yet.")
 
