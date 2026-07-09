@@ -99,7 +99,7 @@ class TestLibraryPageContextMenu:
 
 
 class TestCLIDownloadCommand:
-    """Exercises the headless qBittorrent download flow."""
+    """Exercises the headless native torrent engine download flow."""
 
     def _make_spec(self, **overrides) -> MagicMock:
         spec = MagicMock(
@@ -107,6 +107,7 @@ class TestCLIDownloadCommand:
             torrent_name="test_torrent",
             torrent_path=Path("/fake/test.torrent"),
             select_index=1,
+            torrent_file_index=0,
         )
         for key, value in overrides.items():
             setattr(spec, key, value)
@@ -128,8 +129,8 @@ class TestCLIDownloadCommand:
             command_download(args)
 
     def test_command_download_connection_failure(self, monkeypatch):
-        """GIVEN a valid spec but unreachable qBittorrent WHEN
-        command_download is called THEN ``client.login`` propagates
+        """GIVEN a valid spec but unreachable native torrent engine WHEN
+        command_download is called THEN the constructor propagates
         the ConnectionError."""
         from minerva_cli import command_download
 
@@ -137,15 +138,12 @@ class TestCLIDownloadCommand:
         mock_db.get_download_spec.return_value = self._make_spec()
         monkeypatch.setattr("minerva_cli.MinervaDB", lambda: mock_db)
 
-        mock_client = MagicMock()
-        mock_client.login.side_effect = ConnectionError("Refused")
-        monkeypatch.setattr(
-            "minerva_cli.QBittorrentClient", lambda *a: mock_client
-        )
+        def failing_constructor(*a, **k):
+            raise ConnectionError("Refused")
 
-        monkeypatch.setenv("MINERVA_QBIT_URL", "http://localhost:8080")
-        monkeypatch.setenv("MINERVA_QBIT_USER", "admin")
-        monkeypatch.setenv("MINERVA_QBIT_PASS", "adminadmin")
+        monkeypatch.setattr(
+            "minerva_cli.NativeTorrentSession", failing_constructor
+        )
 
         args = MagicMock()
         args.file_id = 1
@@ -155,7 +153,7 @@ class TestCLIDownloadCommand:
             command_download(args)
 
     def test_command_download_success(self, monkeypatch, capsys):
-        """GIVEN a valid spec and a connected qBittorrent WHEN
+        """GIVEN a valid spec and a connected native torrent engine WHEN
         command_download is called THEN the torrent is added paused,
         the file priorities are set, and the torrent is resumed."""
         from minerva_cli import command_download
@@ -165,32 +163,28 @@ class TestCLIDownloadCommand:
         monkeypatch.setattr("minerva_cli.MinervaDB", lambda: mock_db)
 
         mock_client = MagicMock()
-        mock_client.login.return_value = None
         mock_client.add_torrent_paused.return_value = "deadbeef"
         mock_client.get_files.return_value = [
             {"index": 0, "name": "test.zip", "size": 1000},
             {"index": 1, "name": "extra.rom", "size": 500},
         ]
+        mock_client.get_torrent_info.return_value = {"progress": 1.0}
         monkeypatch.setattr(
-            "minerva_cli.QBittorrentClient", lambda *a: mock_client
+            "minerva_cli.NativeTorrentSession", lambda *a, **k: mock_client
         )
-
-        monkeypatch.setenv("MINERVA_QBIT_URL", "http://localhost:8080")
-        monkeypatch.setenv("MINERVA_QBIT_USER", "admin")
-        monkeypatch.setenv("MINERVA_QBIT_PASS", "adminadmin")
 
         args = MagicMock()
         args.file_id = 1
         args.dest = "/tmp/downloads"
+        args.timeout = None
 
         command_download(args)
 
+        mock_client.start.assert_called_once()
         mock_client.add_torrent_paused.assert_called_once()
-        # Two priority adjustments: first zero everything, then enable
-        # the target file at index ``select_index - 1``.
-        assert mock_client.set_file_priority.call_count == 2
-        mock_client.resume.assert_called_once_with("deadbeef")
+        mock_client.set_file_priority.assert_any_call("deadbeef", [0, 1], 0)
+        mock_client.set_file_priority.assert_any_call("deadbeef", [0], 1)
+        mock_client.resume.assert_called_once()
 
         captured = capsys.readouterr()
-        assert "test.zip" in captured.out
         assert "deadbeef" in captured.out

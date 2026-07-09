@@ -43,7 +43,7 @@ class TestSetTrackedHashes:
 
 
 class TestStartStop:
-    def test_start_creates_timer(self, monitor):
+    def test_start_creates_timer(self, qtbot, monitor):
         monitor.start()
         assert monitor._timer is not None
         assert monitor._timer.isActive()
