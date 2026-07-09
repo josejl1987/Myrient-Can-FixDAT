@@ -8,7 +8,7 @@ from typing import Callable
 
 import requests
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
 class HttpDownloadAdapter:
@@ -93,7 +93,7 @@ class HttpDownloadAdapter:
 
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
-                logger.warning(
+                log.warning(
                     "HTTP %s downloading %s (attempt %d/%d)",
                     status,
                     url,
@@ -106,7 +106,7 @@ class HttpDownloadAdapter:
                     sleep_time = (2 ** (attempt - 1)) * self.backoff_base
                     time.sleep(sleep_time)
             except requests.exceptions.RequestException as exc:
-                logger.warning(
+                log.warning(
                     "Request error downloading %s (attempt %d/%d): %s",
                     url,
                     attempt,
@@ -119,7 +119,7 @@ class HttpDownloadAdapter:
                     sleep_time = (2 ** (attempt - 1)) * self.backoff_base
                     time.sleep(sleep_time)
             except OSError as exc:
-                logger.warning(
+                log.warning(
                     "OS error downloading %s (attempt %d/%d): %s",
                     url,
                     attempt,

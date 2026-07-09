@@ -1,15 +1,15 @@
-"""Tests for QbitMonitor — hash tracking, polling, connection state."""
+"""Tests for NativeMonitor — hash tracking, polling, connection state."""
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock
 
 import pytest
 from PyQt6 import QtCore
 
-from minerva.app.qbit_monitor import QbitMonitor
-from minerva.domain.downloads import TorrentFileInfo, TorrentInfo
-from minerva_qbit import QBittorrentError
+from minerva.app.torrent_monitor import NativeMonitor
+from minerva.native_torrent import NativeTorrentError
 
 
 @pytest.fixture
@@ -21,8 +21,7 @@ def mock_client():
 
 @pytest.fixture
 def monitor(mock_client):
-    return QbitMonitor(mock_client)
-
+    return NativeMonitor(mock_client)
 
 class TestSetTrackedHashes:
     def test_empty_set(self, monitor):
@@ -121,7 +120,7 @@ class TestPoll:
     def test_poll_handles_qbit_error(self, qtbot, monitor, mock_client):
         monitor.set_tracked_hashes({"h1"})
         mock_client.is_logged_in = True
-        mock_client.list_torrents.side_effect = QBittorrentError("offline")
+        mock_client.list_torrents.side_effect = NativeTorrentError("offline")
         with qtbot.wait_signal(monitor.error, timeout=2000) as blocker:
             monitor._poll()
         assert "offline" in blocker.args[0]
@@ -157,7 +156,7 @@ class TestPoll:
              "size": 0, "completed": 0, "ratio": 0.0, "eta": -1,
              "save_path": "", "num_seeds": 0, "num_leechs": 0},
         ]
-        mock_client.get_files.side_effect = QBittorrentError("nope")
+        mock_client.get_files.side_effect = NativeTorrentError("nope")
         with qtbot.wait_signal(monitor.snapshot_ready, timeout=2000) as blocker:
             monitor._poll()
         ti = blocker.args[0][0]
@@ -173,3 +172,13 @@ class TestPoll:
         monitor._poll()
         assert emitted == [[]]
         assert monitor.is_connected is True
+
+
+def test_start_log_message_says_native_monitor(qtbot, mock_client, caplog):
+    """The start log message says NativeMonitor, not QbitMonitor."""
+    monitor = NativeMonitor(mock_client)
+    with caplog.at_level(logging.INFO):
+        monitor.start()
+    monitor.stop()
+    assert any("NativeMonitor started" in r.message for r in caplog.records)
+    assert not any("QbitMonitor" in r.message for r in caplog.records)

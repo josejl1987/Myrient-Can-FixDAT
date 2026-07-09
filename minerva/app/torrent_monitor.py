@@ -1,4 +1,4 @@
-"""Thread-affine qBittorrent polling worker."""
+"""Thread-affine native libtorrent polling worker."""
 
 from __future__ import annotations
 
@@ -9,13 +9,12 @@ from collections.abc import Collection
 from PyQt6 import QtCore
 
 from minerva.domain.downloads import TorrentFileInfo, TorrentInfo
-from minerva_qbit import QBittorrentClient, QBittorrentError
+from minerva.native_torrent import NativeTorrentError, NativeTorrentSession
 
 log = logging.getLogger(__name__)
 
 
-class QbitMonitor(QtCore.QObject):
-    """Poll all tracked torrent hashes in one qBittorrent API request."""
+class NativeMonitor(QtCore.QObject):
 
     snapshot_ready = QtCore.pyqtSignal(list)  # list[TorrentInfo]
     connection_changed = QtCore.pyqtSignal(object)  # bool
@@ -27,16 +26,21 @@ class QbitMonitor(QtCore.QObject):
 
     def __init__(
         self,
-        client: QBittorrentClient,
+        client: NativeTorrentSession,
         parent: QtCore.QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._client = client
-        self._tracked_hashes: set[str] = set()
         self._connected = False
+        self._tracked_hashes: set[str] = set()
         self._timer: QtCore.QTimer | None = None
         self._last_error_msg: str | None = None
         self._last_error_time: float = 0.0
+
+    @property
+    def tracked_hashes(self) -> frozenset:
+        """Return the set of currently tracked hashes."""
+        return frozenset(self._tracked_hashes)
 
     @QtCore.pyqtSlot(object)
     def set_tracked_hashes(self, hashes: Collection[str]) -> None:
@@ -52,14 +56,14 @@ class QbitMonitor(QtCore.QObject):
             self._timer.timeout.connect(self._poll)
         if not self._timer.isActive():
             self._timer.start()
-            log.info("QbitMonitor started (interval=%dms)", self._timer.interval())
+            log.info("NativeMonitor started (interval=%dms)", self._timer.interval())
 
     @QtCore.pyqtSlot()
     def stop(self) -> None:
         if self._timer is not None and self._timer.isActive():
             self._timer.stop()
         self.stopped.emit()
-        log.info("QbitMonitor stopped")
+        log.info("NativeMonitor stopped")
 
     @QtCore.pyqtSlot()
     def _poll(self) -> None:
@@ -70,7 +74,7 @@ class QbitMonitor(QtCore.QObject):
             if not self._client.is_logged_in:
                 self._client.login()
             raw_items = self._client.list_torrents(sorted(self._tracked_hashes))
-        except QBittorrentError as exc:
+        except NativeTorrentError as exc:
             self._set_connected(False)
             now = time.monotonic()
             msg = str(exc)
@@ -89,7 +93,7 @@ class QbitMonitor(QtCore.QObject):
                 continue
             try:
                 raw_files = self._client.get_files(torrent_hash)
-            except QBittorrentError as exc:
+            except NativeTorrentError as exc:
                 log.warning("_poll: get_files failed for %s: %s", torrent_hash[:8], exc)
                 raw_files = []
             files = tuple(
