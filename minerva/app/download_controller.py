@@ -17,7 +17,7 @@ import requests
 from PyQt6 import QtCore
 
 from minerva.app.app_state import AppState
-from minerva.app.qbit_monitor import QbitMonitor
+from minerva.app.qbit_monitor import NativeMonitor
 from minerva.domain.downloads import (
     DOWNLOAD_ACTIVE_STATUSES,
     DOWNLOAD_DEAD_STATUSES,
@@ -30,8 +30,8 @@ from minerva.domain.downloads import (
     TorrentInfo,
 )
 from minerva.domain.sources import DownloadSource
+from minerva.native_torrent import NativeTorrentSession
 from minerva_db import DEFAULT_TORRENT_DIR
-from minerva_qbit import QBittorrentClient, QBittorrentError
 from minerva_state import MinervaState
 
 log = logging.getLogger(__name__)
@@ -77,6 +77,7 @@ class DownloadController(QtCore.QObject):
 
     _monitor_hashes_requested = QtCore.pyqtSignal(object)
     _monitor_stop_requested = QtCore.pyqtSignal()
+    _submit_torrent_group_requested = QtCore.pyqtSignal(str)
 
     _ACTIVE_UPLOAD_STATES = {"uploading", "stalledUP", "forcedUP", "queuedUP"}
     _QBT_STATUS_MAP: dict[str, DownloadStatus] = {
@@ -108,16 +109,16 @@ class DownloadController(QtCore.QObject):
         self,
         state: MinervaState,
         app_state: AppState,
-        qbit_client: QBittorrentClient,
-        seed_dir: str | Path = ".qbitseed",
+        client: NativeTorrentSession,
+        output_dir: str | Path = "downloads",
         allow_copy_fallback: bool = True,
         parent: QtCore.QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self._state = state
         self._app_state = app_state
-        self._qbit_template = qbit_client
-        self._seed_dir = Path(seed_dir).expanduser().resolve()
+        self._client = client
+        self._output_dir = Path(output_dir).expanduser().resolve()
         self._allow_copy_fallback = allow_copy_fallback
         self._pool = QtCore.QThreadPool.globalInstance()
         self._tasks: set[_FunctionTask] = set()
@@ -133,7 +134,7 @@ class DownloadController(QtCore.QObject):
         # accidental future access from worker threads.
         self._sets_lock = threading.Lock()
 
-        self._monitor: QbitMonitor | None = None
+        self._monitor: NativeMonitor | None = None
         self._monitor_thread: QtCore.QThread | None = None
 
         self.file_spec_resolver: Callable[[int], DownloadFileSpec | None] | None = None
@@ -143,7 +144,13 @@ class DownloadController(QtCore.QObject):
         # serve stale file metadata (torrent path, qbit index, size)
         # from a previous index generation.
         self._app_state.index_state_changed.connect(self._on_index_changed)
-
+        # Marshal _submit_torrent_group calls to the main thread —
+        # reconcile() runs on a QThreadPool worker which has no event
+        # loop, so QTimer.singleShot would never fire.
+        self._submit_torrent_group_requested.connect(
+            self._submit_torrent_group,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
     # ── Queue commands ──────────────────────────────────────────────────
 
     def add_to_queue(
@@ -330,9 +337,33 @@ class DownloadController(QtCore.QObject):
         self._emit_changed()
         self._schedule_record_submission(record)
 
+    def retry_all_failed(self) -> int:
+        """Re-queue all FAILED records and return the count retried.
+
+        For each failed record: clears its error, resets status to QUEUED,
+        and clears qbit_hash (so ``_schedule_record_submission`` will
+        re-submit the torrent).  Does not delete torrents from qBittorrent
+        — the caller can call :meth:`retry` for individual records if
+        orphan cleanup is needed.
+        """
+        failed = [
+            r for r in self._state.list_queue()
+            if r.status == DownloadStatus.FAILED.value
+        ]
+        for record in failed:
+            self._state.update_queue_record(
+                record.id,
+                status=DownloadStatus.QUEUED.value,
+                error=None,
+                qbit_hash=None,
+            )
+            self._schedule_record_submission(record)
+        if failed:
+            self._emit_changed()
+        return len(failed)
+
     def pause_all(self) -> None:
         # Snapshot active records once to avoid StopIteration if pause()
-        # removes records from the active set mid-iteration.
         active = self.get_active_records()
         hashes = {r.qbit_hash for r in active if r.qbit_hash}
         for torrent_hash in hashes:
@@ -448,7 +479,7 @@ class DownloadController(QtCore.QObject):
             self._sync_monitor_hashes()
             return
         thread = QtCore.QThread(self)
-        monitor = QbitMonitor(self._qbit_template.clone())
+        monitor = NativeMonitor(self._client.clone())
         monitor.moveToThread(thread)
         thread.started.connect(monitor.start)
         monitor.snapshot_ready.connect(self._on_snapshot)
@@ -486,6 +517,11 @@ class DownloadController(QtCore.QObject):
         self._monitor_thread = None
         self._monitor = None
 
+    def shutdown(self) -> None:
+        """Stop monitoring and destroy the torrent session."""
+        self.stop_monitoring()
+        self._client.stop()
+
     def reconcile(self) -> None:
         """Re-queue orphaned records and submit unstarted ones.
 
@@ -516,6 +552,7 @@ class DownloadController(QtCore.QObject):
                 DownloadStatus.STARTING.value,
                 DownloadStatus.DOWNLOADING.value,
                 DownloadStatus.PAUSED.value,
+                DownloadStatus.SEEDING.value,
             }:
                 if live_hashes is None:
                     try:
@@ -524,8 +561,8 @@ class DownloadController(QtCore.QObject):
                             t.get("hash", "") for t in client.list_torrents()
                         }
                     except Exception:
-                        log.warning("reconcile: could not query torrent engine, skipping hash verification")
-                        live_hashes = set()  # Empty set = skip vanished-torrent check
+                        log.warning("reconcile: could not query torrent engine, skipping hash verification", exc_info=True)
+                        continue
                 if record.qbit_hash not in live_hashes:
                     log.info(
                         "reconcile: torrent %s vanished, re-queuing %s",
@@ -583,6 +620,7 @@ class DownloadController(QtCore.QObject):
         changed = False
         total_speed = 0
         dirty_runtime_ids: set[str] = set()
+        pending_completions: list[tuple[QueueRecord, TorrentInfo, DownloadStatus]] = []
         for ti in torrents:
             group = records_by_hash.get(ti.hash, [])
             total_speed += ti.dlspeed
@@ -627,7 +665,7 @@ class DownloadController(QtCore.QObject):
                             changed = True
                     continue
                 if new_status == DownloadStatus.COMPLETED and record.status != DownloadStatus.COMPLETED.value:
-                    self._schedule_completed_file(record, ti, new_status)
+                    pending_completions.append((record, ti, new_status))
                 elif record.status != new_status.value:
                     self._state.update_queue_record(record.id, status=new_status.value)
                     changed = True
@@ -655,6 +693,12 @@ class DownloadController(QtCore.QObject):
         if changed:
             self._emit_changed()
 
+        # Process pending completions after the loop — _schedule_completed_file
+        # calls _emit_changed() which nulls _queue_cache, so it must not run
+        # mid-iteration.
+        for record, ti, new_status in pending_completions:
+            self._schedule_completed_file(record, ti, new_status)
+
     def _schedule_record_submission(self, record: QueueRecord) -> None:
         # Route by source — archive.org records don't use the local torrent index
         if record.source == DownloadSource.ARCHIVE_ORG_HTTP.value:
@@ -677,182 +721,218 @@ class DownloadController(QtCore.QObject):
 
     def _schedule_torrent_submission(self, torrent_name: str) -> None:
         if not self._app_state.qbit_state:
-            # qBittorrent is disconnected — defer until reconnect.
-            # reconcile() re-schedules QUEUED records on the next
-            # successful connection.
+            # The native session was disconnected at startup and hasn't
+            # been reconnected yet. The first successful monitor poll will
+            # trigger _on_connection_changed(True) and submit queued records
+            # via reconcile().  In rare cases (e.g. a native session that
+            # failed to start), the record stays QUEUED until the user
+            # retries or the app is restarted.
             return
         with self._sets_lock:
             if torrent_name in self._submitting_torrents:
                 self._resubmit_torrents.add(torrent_name)
                 return
             self._submitting_torrents.add(torrent_name)
-        QtCore.QTimer.singleShot(0, lambda name=torrent_name: self._submit_torrent_group(name))
+        self._submit_torrent_group_requested.emit(torrent_name)
 
     def _submit_torrent_group(self, torrent_name: str) -> None:
-        group: list[tuple[QueueRecord, DownloadFileSpec]] = []
-        for record in self._state.list_queue():
-            if record.status == DownloadStatus.CANCELLED.value:
-                continue
-            spec = self._resolve_spec(record.file_id)
-            if spec is not None and spec.torrent_name == torrent_name:
-                group.append((record, spec))
-        if not group:
-            return
-        torrent_path = group[0][1].torrent_path
-        if not torrent_path.is_file():
-            message = f"Torrent file not found: {torrent_path}"
-            for record, _spec in group:
-                self._state.update_queue_record(
-                    record.id, status=DownloadStatus.FAILED.value, error=message,
-                )
-            self.error.emit(message)
-            self._emit_changed()
-            return
-
-        existing_hash = next((r.qbit_hash for r, _ in group if r.qbit_hash), None)
-        # Only include indices for active records — FAILED/CANCELLED/COMPLETED/SEEDING
-        # records should not have their files prioritized in qBittorrent.
-        _active_values = {s.value for s in DOWNLOAD_ACTIVE_STATUSES}
-        target_indices = sorted({
-            spec.qbit_file_index
-            for record, spec in group
-            if record.status in _active_values
-        })
-        group_ids = [
-            record.id for record, _spec in group
-            if record.status in {
-                DownloadStatus.QUEUED.value,
-                DownloadStatus.STARTING.value,
-                DownloadStatus.DOWNLOADING.value,
-                DownloadStatus.PAUSED.value,
-            }
-        ]
-        if not group_ids:
-            return
-        for record, _spec in group:
-            if record.id in group_ids and record.status != DownloadStatus.PAUSED.value:
-                self._state.update_queue_record(
-                    record.id, status=DownloadStatus.STARTING.value, error=None,
-                )
-        self._emit_changed()
-        self._seed_dir.mkdir(parents=True, exist_ok=True)
-
-        def operation() -> dict[str, object]:
-            client = self._logged_in_clone()
-            torrent_hash = existing_hash or client.add_torrent_paused(
-                str(torrent_path), str(self._seed_dir),
-            )
-            if not torrent_hash:
-                raise QBittorrentError("qBittorrent accepted the torrent but no hash was found")
-            files = client.get_files(torrent_hash)
-            # Retry a few times if qBittorrent hasn't finished processing
-            # the torrent metadata yet (returns empty file list).
-            for _ in range(5):
-                if files:
-                    break
-                time.sleep(0.5)
-                files = client.get_files(torrent_hash)
-            available = {int(item.get("index", -1)) for item in files}
-            missing = [idx for idx in target_indices if idx not in available]
-            if missing:
-                raise QBittorrentError(
-                    f"Torrent file indices not found: {', '.join(map(str, missing))}"
-                )
-            all_indices = sorted(idx for idx in available if idx >= 0)
-            client.set_file_priority(torrent_hash, all_indices, 0)
-            client.set_file_priority(torrent_hash, target_indices, 1)
-            # Only resume if no records were user-paused. If the user
-            # explicitly paused this torrent, respect that and don't auto-resume.
-            user_paused = any(
-                rec.status == DownloadStatus.PAUSED.value
-                for rec, _ in group
-                if rec.id in group_ids
-            )
-            if not user_paused:
-                try:
-                    client.resume(torrent_hash)
-                except Exception as exc:
-                    log.warning("Could not resume torrent (user may need to resume manually): %s", exc)
-
-            # Rename torrent to a friendly display name including collection/system.
-            try:
-                # ponytail: pick the first active record's spec so the display
-                # name reflects the actual selection, not a cancelled neighbour.
-                first_spec = next(
-                    (spec for rec, spec in group
-                     if rec.id in group_ids),
-                    group[0][1],
-                )
-                if len(target_indices) == 1:
-                    stem = Path(first_spec.basename).stem
-                    display_name = f"{first_spec.collection} - {first_spec.system} - {stem}"
-                else:
-                    display_name = (
-                        f"{first_spec.collection} - {first_spec.system}"
-                        f" - {len(target_indices)} selected files"
-                    )
-                client.rename(torrent_hash, display_name)
-            except Exception as exc:
-                log.warning("Could not rename torrent in qBittorrent: %s", exc)
-
-            return {"hash": torrent_hash, "record_ids": group_ids}
-
-        def succeeded(result: object) -> None:
-            payload = dict(result)
-            torrent_hash = str(payload["hash"])
-            for record_id in payload["record_ids"]:
-                current = self._get_record(str(record_id))
-                if current is None or current.status in {
-                    DownloadStatus.CANCELLED.value,
-                    DownloadStatus.COMPLETED.value,
-                    DownloadStatus.SEEDING.value,
-                    DownloadStatus.FAILED.value,
-                    DownloadStatus.PAUSED.value,
-                }:
-                    # PAUSED records: user paused manually — respect that;
-                    # just set the qbit_hash so we can track the torrent,
-                    # but keep the PAUSED status.
-                    if current is not None and current.status == DownloadStatus.PAUSED.value:
-                        self._state.update_queue_record(
-                            current.id, qbit_hash=torrent_hash, error=None,
-                        )
+        task_started = False
+        try:
+            group: list[tuple[QueueRecord, DownloadFileSpec]] = []
+            for record in self._state.list_queue():
+                if record.status == DownloadStatus.CANCELLED.value:
                     continue
-                self._state.update_queue_record(
-                    current.id,
-                    status=DownloadStatus.DOWNLOADING.value,
-                    qbit_hash=torrent_hash,
-                    error=None,
-                )
-            self._state.add_event(
-                "download",
-                f"Started {len(group_ids)} selected file(s) from {torrent_name}",
-            )
-            self._sync_monitor_hashes()
-            self._emit_changed()
+                spec = self._resolve_spec(record.file_id)
+                if spec is not None and spec.torrent_name == torrent_name:
+                    group.append((record, spec))
+            if not group:
+                return
+            torrent_path = group[0][1].torrent_path
+            if not torrent_path.is_file():
+                message = f"Torrent file not found: {torrent_path}"
+                for record, _spec in group:
+                    self._state.update_queue_record(
+                        record.id, status=DownloadStatus.FAILED.value, error=message,
+                    )
+                self.error.emit(message)
+                self._emit_changed()
+                return
 
-        def failed(message: str) -> None:
-            for record_id in group_ids:
-                current = self._get_record(record_id)
-                if current is not None and current.status == DownloadStatus.STARTING.value:
+            existing_hash = next((r.qbit_hash for r, _ in group if r.qbit_hash), None)
+            # Only include indices for active records — FAILED/CANCELLED/COMPLETED/SEEDING
+            # records should not have their files prioritized in qBittorrent.
+            _active_values = {s.value for s in DOWNLOAD_ACTIVE_STATUSES}
+            target_indices = sorted({
+                spec.qbit_file_index
+                for record, spec in group
+                if record.status in _active_values
+            })
+            group_ids = [
+                record.id for record, _spec in group
+                if record.status in {
+                    DownloadStatus.QUEUED.value,
+                    DownloadStatus.STARTING.value,
+                    DownloadStatus.DOWNLOADING.value,
+                    DownloadStatus.PAUSED.value,
+                }
+            ]
+            if not group_ids:
+                return
+            for record, _spec in group:
+                if record.id in group_ids and record.status != DownloadStatus.PAUSED.value:
+                    self._state.update_queue_record(
+                        record.id, status=DownloadStatus.STARTING.value, error=None,
+                    )
+            self._emit_changed()
+            self._output_dir.mkdir(parents=True, exist_ok=True)
+
+            def operation() -> dict[str, object]:
+                client = self._logged_in_clone()
+                torrent_hash = existing_hash or client.add_torrent_paused(
+                    str(torrent_path), str(self._output_dir),
+                )
+                if not torrent_hash:
+                    raise RuntimeError("Torrent accepted but no hash was found")
+                files = client.get_files(torrent_hash)
+                # Retry a few times if qBittorrent hasn't finished processing
+                # the torrent metadata yet (returns empty file list).
+                for _ in range(5):
+                    if files:
+                        break
+                    time.sleep(0.5)
+                    files = client.get_files(torrent_hash)
+                available = {int(item.get("index", -1)) for item in files}
+                missing = [idx for idx in target_indices if idx not in available]
+                if missing:
+                    raise RuntimeError(
+                        f"Torrent file indices not found: {', '.join(map(str, missing))}"
+                    )
+                all_indices = sorted(idx for idx in available if idx >= 0)
+                client.set_file_priority(torrent_hash, all_indices, 0)
+                client.set_file_priority(torrent_hash, target_indices, 1)
+
+                # Rename each selected file to its RomM destination path
+                # (relative to output_dir) so the file downloads directly to
+                # where the user wants it — no staging directory, no hardlinks.
+                from minerva.romm.paths import romm_destination
+                for rec, spec in group:
+                    if rec.id not in group_ids:
+                        continue
+                    if spec.qbit_file_index not in target_indices:
+                        continue
+                    dest_rel = romm_destination(self._output_dir, spec.system, spec.basename)
+                    new_path = str(dest_rel.relative_to(self._output_dir))
+                    # Find the torrent-internal path for this file index.
+                    old_path = next(
+                        (str(item.get("name", "")) for item in files
+                         if int(item.get("index", -1)) == spec.qbit_file_index),
+                        None,
+                    )
+                    if old_path:
+                        dest_parent = dest_rel.parent
+                        dest_parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            client.rename_file(torrent_hash, old_path, new_path)
+                        except Exception as exc:
+                            log.warning("Could not rename file %s -> %s: %s", old_path, new_path, exc)
+
+                # Only resume if no records were user-paused. If the user
+                # explicitly paused this torrent, respect that and don't auto-resume.
+                user_paused = any(
+                    rec.status == DownloadStatus.PAUSED.value
+                    for rec, _ in group
+                    if rec.id in group_ids
+                )
+                if not user_paused:
+                    try:
+                        client.resume(torrent_hash)
+                    except Exception as exc:
+                        log.warning("Could not resume torrent (user may need to resume manually): %s", exc)
+
+                # Rename torrent to a friendly display name including collection/system.
+                try:
+                    # ponytail: pick the first active record's spec so the display
+                    # name reflects the actual selection, not a cancelled neighbour.
+                    first_spec = next(
+                        (spec for rec, spec in group
+                         if rec.id in group_ids),
+                        group[0][1],
+                    )
+                    if len(target_indices) == 1:
+                        stem = Path(first_spec.basename).stem
+                        display_name = f"{first_spec.collection} - {first_spec.system} - {stem}"
+                    else:
+                        display_name = (
+                            f"{first_spec.collection} - {first_spec.system}"
+                            f" - {len(target_indices)} selected files"
+                        )
+                    client.rename(torrent_hash, display_name)
+                except Exception as exc:
+                    log.warning("Could not rename torrent in qBittorrent: %s", exc)
+
+                return {"hash": torrent_hash, "record_ids": group_ids}
+
+            def succeeded(result: object) -> None:
+                payload = dict(result)
+                torrent_hash = str(payload["hash"])
+                for record_id in payload["record_ids"]:
+                    current = self._get_record(str(record_id))
+                    if current is None or current.status in {
+                        DownloadStatus.CANCELLED.value,
+                        DownloadStatus.COMPLETED.value,
+                        DownloadStatus.SEEDING.value,
+                        DownloadStatus.FAILED.value,
+                        DownloadStatus.PAUSED.value,
+                    }:
+                        # PAUSED records: user paused manually — respect that;
+                        # just set the qbit_hash so we can track the torrent,
+                        # but keep the PAUSED status.
+                        if current is not None and current.status == DownloadStatus.PAUSED.value:
+                            self._state.update_queue_record(
+                                current.id, qbit_hash=torrent_hash, error=None,
+                            )
+                        continue
                     self._state.update_queue_record(
                         current.id,
-                        status=DownloadStatus.FAILED.value,
-                        qbit_hash=None,
-                        error=message,
+                        status=DownloadStatus.DOWNLOADING.value,
+                        qbit_hash=torrent_hash,
+                        error=None,
                     )
-            self.error.emit(f"Could not start {torrent_name}: {message}")
-            self._emit_changed()
+                self._state.add_event(
+                    "download",
+                    f"Started {len(group_ids)} selected file(s) from {torrent_name}",
+                )
+                self._sync_monitor_hashes()
+                self._emit_changed()
 
-        def finished() -> None:
-            with self._sets_lock:
-                self._submitting_torrents.discard(torrent_name)
-                needs_resubmit = torrent_name in self._resubmit_torrents
+            def failed(message: str) -> None:
+                for record_id in group_ids:
+                    current = self._get_record(record_id)
+                    if current is not None and current.status == DownloadStatus.STARTING.value:
+                        self._state.update_queue_record(
+                            current.id,
+                            status=DownloadStatus.FAILED.value,
+                            qbit_hash=None,
+                            error=message,
+                        )
+                self.error.emit(f"Could not start {torrent_name}: {message}")
+                self._emit_changed()
+
+            def finished() -> None:
+                with self._sets_lock:
+                    self._submitting_torrents.discard(torrent_name)
+                    needs_resubmit = torrent_name in self._resubmit_torrents
+                    if needs_resubmit:
+                        self._resubmit_torrents.discard(torrent_name)
                 if needs_resubmit:
-                    self._resubmit_torrents.discard(torrent_name)
-            if needs_resubmit:
-                self._schedule_torrent_submission(torrent_name)
+                    self._schedule_torrent_submission(torrent_name)
 
-        self._run_task(operation, succeeded, failed, finished)
+            task_started = True
+            self._run_task(operation, succeeded, failed, finished)
+        finally:
+            if not task_started:
+                with self._sets_lock:
+                    self._submitting_torrents.discard(torrent_name)
 
     # ── Archive.org HTTP download ───────────────────────────────────────
 
@@ -937,7 +1017,7 @@ class DownloadController(QtCore.QObject):
             error=None,
         )
         self._emit_changed()
-        self._seed_dir.mkdir(parents=True, exist_ok=True)
+        self._output_dir.mkdir(parents=True, exist_ok=True)
 
         def operation() -> dict[str, object]:
             import tempfile
@@ -947,14 +1027,20 @@ class DownloadController(QtCore.QObject):
             response = requests.get(torrent_url, timeout=30)
             response.raise_for_status()
             with tempfile.NamedTemporaryFile(
-                suffix=".torrent", dir=str(self._seed_dir), delete=False
+                suffix=".torrent", delete=False
             ) as tf:
                 tf.write(response.content)
                 torrent_path = Path(tf.name)
 
-            torrent_hash = client.add_torrent_paused(str(torrent_path), str(self._seed_dir))
+            try:
+                torrent_hash = client.add_torrent_paused(str(torrent_path), str(self._output_dir))
+            finally:
+                try:
+                    torrent_path.unlink()
+                except OSError:
+                    pass
             if not torrent_hash:
-                raise QBittorrentError("qBittorrent accepted the torrent but no hash was found")
+                raise RuntimeError("Torrent accepted but no hash was found")
 
             files = client.get_files(torrent_hash)
             for _ in range(5):
@@ -966,26 +1052,41 @@ class DownloadController(QtCore.QObject):
             target_basename = PurePosixPath(filename).name.lower()
             target_index = None
             all_indices = []
+            target_old_path: str | None = None
             for item in files:
                 idx = int(item.get("index", -1))
                 if idx >= 0:
                     all_indices.append(idx)
-                item_name = str(item.get("name", "")).lower()
-                if target_basename in item_name or item_name.endswith(target_basename):
+                item_basename = str(item.get("name", "")).rsplit("/", 1)[-1].lower()
+                if item_basename == target_basename:
                     target_index = idx
+                    target_old_path = str(item.get("name", ""))
 
             if target_index is None:
                 target_index = all_indices[0] if all_indices else 0
+                target_old_path = next(
+                    (str(item.get("name", "")) for item in files
+                     if int(item.get("index", -1)) == target_index),
+                    None,
+                )
                 log.warning("Could not find %s in archive.org torrent, using first file", filename)
 
             client.set_file_priority(torrent_hash, all_indices, 0)
             client.set_file_priority(torrent_hash, [target_index], 1)
-            client.resume(torrent_hash)
 
-            try:
-                torrent_path.unlink()
-            except OSError:
-                pass
+            # Rename the target file to the user's destination path
+            # (relative to output_dir) so it downloads directly to the
+            # final location — no staging directory needed.
+            destination = Path(record.destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if target_old_path:
+                new_path = str(destination.relative_to(self._output_dir))
+                try:
+                    client.rename_file(torrent_hash, target_old_path, new_path)
+                except Exception as exc:
+                    log.warning("Could not rename archive.org file %s -> %s: %s", target_old_path, new_path, exc)
+
+            client.resume(torrent_hash)
 
             return {"hash": torrent_hash, "record_ids": [record.id]}
 
@@ -1037,59 +1138,44 @@ class DownloadController(QtCore.QObject):
             self._linking_records.add(record.id)
 
         def operation() -> Path:
-            client = self._logged_in_clone()
-            files = client.get_files(torrent.hash)
-            remote = next(
-                (item for item in files if int(item.get("index", -1)) == spec.qbit_file_index),
-                None,
-            )
-            if remote is None:
-                raise FileNotFoundError(
-                    f"qBittorrent file index {spec.qbit_file_index} is missing"
+            destination = Path(record.destination)
+            # The file was renamed to its RomM destination path during
+            # torrent submission, so it should already be at the final
+            # location.  Verify it exists and has the expected size.
+            if not destination.is_file():
+                # Fallback: search save_path for the file in case the
+                # rename_file call during submission failed silently.
+                save_path = Path(torrent.save_path)
+                source = next(
+                    (p for p in save_path.rglob(spec.basename)
+                     if p.is_file() and p.stat().st_size == spec.size),
+                    None,
                 )
-            remote_name = str(remote.get("name", ""))
-            save_path = Path(torrent.save_path)
-            candidates = [
-                save_path / remote_name,
-                save_path / torrent.name / spec.path_in_torrent,
-                save_path / spec.path_in_torrent,
-            ]
-            source = next((p for p in candidates if p.is_file()), None)
-            if source is None:
-                for candidate in save_path.rglob(spec.basename):
-                    if candidate.is_file() and candidate.stat().st_size == spec.size:
-                        source = candidate
-                        break
-            if source is None:
-                raise FileNotFoundError(
-                    f"Downloaded file not found for {spec.path_in_torrent}"
-                )
-            actual_size = source.stat().st_size
+                if source is None:
+                    raise FileNotFoundError(
+                        f"Downloaded file not found for {spec.path_in_torrent}"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                if destination.exists():
+                    try:
+                        if destination.samefile(source):
+                            return destination
+                    except OSError:
+                        pass
+                    raise FileExistsError(
+                        f"Destination already exists and is not the downloaded file: {destination}"
+                    )
+                try:
+                    os.link(source, destination)
+                except OSError:
+                    if not self._allow_copy_fallback:
+                        raise
+                    shutil.copy2(source, destination)
+            actual_size = destination.stat().st_size
             if spec.size > 0 and actual_size != spec.size:
                 raise OSError(
                     f"Downloaded size mismatch: expected {spec.size}, got {actual_size}"
                 )
-
-            destination = Path(record.destination)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if destination.exists():
-                try:
-                    if destination.samefile(source):
-                        return destination
-                except OSError:
-                    pass
-                raise FileExistsError(
-                    f"Destination already exists and is not the downloaded file: {destination}"
-                )
-            try:
-                os.link(source, destination)
-            except OSError:
-                if not self._allow_copy_fallback:
-                    raise
-                shutil.copy2(source, destination)
-            if spec.size > 0 and destination.stat().st_size != spec.size:
-                destination.unlink(missing_ok=True)
-                raise OSError("Destination verification failed after exposure")
             return destination
 
         def succeeded(result: object) -> None:
@@ -1099,9 +1185,29 @@ class DownloadController(QtCore.QObject):
                 status=final_status.value,
                 error=None,
             )
-            self._state.add_event("hardlink", f"Ready: {destination}")
+            self._state.add_event("complete", f"Ready: {destination}")
             self.activity_event.emit("check", f"Completed {destination.name}")
             self._emit_changed()
+            # Remove torrent from session if no active or seeding records remain.
+            if record.qbit_hash:
+                siblings = [
+                    r for r in self._state.list_queue()
+                    if r.qbit_hash == record.qbit_hash
+                ]
+                still_active = any(
+                    r.status in {s.value for s in DOWNLOAD_ACTIVE_STATUSES}
+                    or r.status == DownloadStatus.SEEDING.value
+                    for r in siblings
+                )
+                if not still_active:
+                    torrent_hash = record.qbit_hash
+                    self._run_qbit_task(
+                        lambda: self._logged_in_clone().delete_torrent(
+                            torrent_hash, delete_files=False,
+                        ),
+                        lambda _result: None,
+                        "Could not remove completed torrent",
+                    )
 
         def failed(message: str) -> None:
             record_hash = record.qbit_hash
@@ -1205,8 +1311,8 @@ class DownloadController(QtCore.QObject):
         """Drop the spec cache when the index is rebuilt."""
         self._spec_cache.clear()
 
-    def _logged_in_clone(self) -> QBittorrentClient:
-        client = self._qbit_template.clone()
+    def _logged_in_clone(self) -> NativeTorrentSession:
+        client = self._client.clone()
         client.login()
         return client
 

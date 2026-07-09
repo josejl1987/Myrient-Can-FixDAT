@@ -23,8 +23,9 @@ from minerva.app.pages import (
 )
 from minerva.app.worker_manager import WorkerManager
 from minerva_db import DEFAULT_INDEX_PATH, DEFAULT_TORRENT_DIR, MinervaDB
-from minerva_qbit import QBittorrentClient
+from minerva.native_torrent import NativeTorrentSession
 from minerva_state import MinervaState
+from minerva.ui.a11y import apply_a11y_defaults
 from minerva.ui.density import Density
 from minerva.ui.theme import ThemeTokens, apply_theme
 if typing.TYPE_CHECKING:
@@ -94,6 +95,7 @@ class AppShell(QtWidgets.QMainWindow):
         self._register_pages()
         self._create_download_controller()
         self._restore_settings_and_show_initial_page()
+        apply_a11y_defaults(self)
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -132,6 +134,7 @@ class AppShell(QtWidgets.QMainWindow):
         if page.parentWidget() is not self._stack:
             self._stack.addWidget(page)
             self._restore_page_layout(page_id, page)
+            apply_a11y_defaults(page)
         self._stack.setCurrentWidget(page)
         self._current_page_id = page_id
         if self._sidebar is not None:
@@ -161,6 +164,7 @@ class AppShell(QtWidgets.QMainWindow):
             self._download_controller.stop_monitoring()
             self._download_controller.deleteLater()
         self._download_controller = None
+        self._app_state.invalidate_output_dir()
         self._create_download_controller()
         self._app_state.queue_changed.emit()
 
@@ -297,20 +301,24 @@ class AppShell(QtWidgets.QMainWindow):
     # ── Download controller lifecycle ────────────────────────────────────
 
     def _create_download_controller(self) -> None:
-        """Build the persistent qBittorrent controller from saved settings."""
+        """Build the persistent download controller backed by native libtorrent."""
         settings = QtCore.QSettings(self._settings_org, self._settings_app)
-        qbit_url = settings.value("qbit_url", "http://localhost:8080", str)
-        qbit_user = settings.value("qbit_user", "admin", str)
-        qbit_pass = settings.value("qbit_pass", "", str)
-        seed_dir = settings.value("qbit_seed_dir", ".qbitseed", str)
+        output_dir = settings.value("output_dir", "downloads", str)
         index_path = settings.value("index_path", str(DEFAULT_INDEX_PATH), str)
         state_path = settings.value("state_db_path", "data/minerva_state.db", str)
 
         try:
-            client = QBittorrentClient(qbit_url, qbit_user, qbit_pass)
+            client = NativeTorrentSession(
+                save_dir=output_dir,
+                seed_ratio=2.0,
+                seed_time_hours=48,
+                max_active_downloads=5,
+                max_active_seeds=10,
+            )
+            client.start()
             db = MinervaDB(index_path)
             state = MinervaState(state_path)
-            controller = DownloadController(state, self._app_state, client, seed_dir)
+            controller = DownloadController(state, self._app_state, client, output_dir)
             controller.queue_changed.connect(self._app_state.queue_changed.emit)
             controller.error.connect(self._show_runtime_error)
             controller.runtime_changed.connect(self._app_state.runtime_changed.emit)
@@ -320,10 +328,8 @@ class AppShell(QtWidgets.QMainWindow):
                 Path(settings.value("torrent_dir", str(DEFAULT_TORRENT_DIR), str)),
             )
             self._download_controller = controller
-            # ponytail: monitoring is started on first showEvent, not here,
-            # so shells constructed but never shown (e.g. attribute-only
-            # unit tests) don't spawn a QThread that would be destroyed
-            # while running during GC.
+            self._app_state.index_db = db
+            self._app_state.qbit_state = True  # native session always connected
         except Exception as exc:
             log.warning("Download controller unavailable: %s", exc, exc_info=True)
             self._download_controller = None
@@ -428,7 +434,7 @@ class AppShell(QtWidgets.QMainWindow):
 
         # Step 5 — destroy
         if self._download_controller is not None:
-            self._download_controller.stop_monitoring()
+            self._download_controller.shutdown()
             self._download_controller.deleteLater()
             self._download_controller = None
         while self._stack.count() > 0:
