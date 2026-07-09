@@ -14,13 +14,16 @@ Compatibility::
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import time
 from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-logger = logging.getLogger(__name__)
+from minerva.logging_config import configure_logging
+
+log = logging.getLogger(__name__)
 
 
 def _resource_root() -> Path:
@@ -55,7 +58,7 @@ def create_application(argv: list[str]) -> QtWidgets.QApplication:
         for ttf in sorted(font_dir.glob("*.ttf")):
             font_id = QtGui.QFontDatabase.addApplicationFont(str(ttf))
             if font_id < 0:
-                logger.warning("Failed to load font: %s", ttf.name)
+                log.warning("Failed to load font: %s", ttf.name)
 
     # Set a concrete default font so custom-painted delegates that read
     # QFont().pixelSize() get a real value (-1 produces QPainter warnings
@@ -85,9 +88,33 @@ def create_main_window() -> QtWidgets.QMainWindow:
     return AppShell()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """Entry point: parse CLI args, create app, show shell, exec."""
-    if "--index" in sys.argv or "--rebuild" in sys.argv:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    # ── Logging setup (before anything else) ────────────────────────
+    console_level = "WARNING"
+    file_level = "INFO"
+    if "--debug" in argv:
+        file_level = "DEBUG"
+        console_level = "DEBUG"
+        argv.remove("--debug")
+    elif "--verbose" in argv or "-v" in argv:
+        console_level = "DEBUG"
+        argv = [a for a in argv if a not in ("--verbose", "-v")]
+
+    env_level = os.environ.get("MINERVA_LOG_LEVEL", "")
+    if env_level:
+        file_level = env_level
+
+    try:
+        configure_logging(file_level, console_level=console_level)
+    except Exception:
+        pass  # Never let logging crash the app
+
+    log.info("Minerva starting up (log level=%s, console=%s)", file_level, console_level)
+
+    if "--index" in argv or "--rebuild" in argv:
         print("Building index…")
         from minerva_db import build_index
 
@@ -95,7 +122,7 @@ def main() -> int:
         build_index()
         print(f"Done in {time.time() - t0:.1f}s")
 
-    app = create_application(sys.argv)
+    app = create_application(argv)
     win = create_main_window()
 
     # First-run wizard check (BEFORE show so wizard is modal)
