@@ -32,8 +32,8 @@ def get_log_file_path() -> Path:
     """Resolve the platform-appropriate log file path.
 
     Creates the parent directory if it doesn't exist. Falls back to
-    ``./logs/minerva.log`` relative to the CWD if the platform path
-    can't be determined.
+    ``./logs/minerva.log`` relative to the CWD if directory creation
+    fails.
     """
     data_home = os.environ.get("XDG_DATA_HOME")
     if data_home:
@@ -69,9 +69,10 @@ def configure_logging(
     """Configure the root logger with file and console handlers.
 
     Parameters:
-        level: Root logger level (applies to file handler). Accepts a
-            level name string ("DEBUG", "INFO", "WARNING", "ERROR") or
-            an int (``logging.DEBUG`` etc.).
+        level: Root logger level. Accepts a level name string
+            ("DEBUG", "INFO", "WARNING", "ERROR") or an int
+            (``logging.DEBUG`` etc.). The console handler also uses this
+            level unless ``console_level`` is provided.
         console_level: Override level for the console handler. Defaults
             to the same as ``level``. Useful when you want the file to
             capture DEBUG while the console only shows WARNING+.
@@ -81,9 +82,10 @@ def configure_logging(
         directory creation failed — in that case logging falls back to
         console-only.
 
-    This function is idempotent: calling it again replaces existing
-    handlers rather than stacking duplicates.
+    This function is idempotent: calling it again removes and replaces
+    the handlers previously installed by this function.
     """
+
     numeric_level = _coerce_level(level)
     numeric_console = _coerce_level(console_level) if console_level is not None else numeric_level
 
