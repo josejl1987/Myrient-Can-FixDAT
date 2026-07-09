@@ -20,9 +20,6 @@ class AccentName:
 
 @dataclass
 class SettingsDraft:
-    qbit_url: str = "http://localhost:8080"
-    qbit_username: str = "admin"
-    qbit_password: str = ""
     output_directory: Path = Path("downloads")
     torrent_directory: Path = Path("torrents/Minerva Myrient - 1050 torrents")
     index_path: Path = Path("torrents/minerva_index.db")
@@ -37,3 +34,4 @@ class SettingsDraft:
     density: Density = Density.COMPACT
     theme: str = ThemeName.DARK
     accent: str = AccentName.GREEN
+    log_level: str = "INFO"
