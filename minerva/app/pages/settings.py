@@ -406,10 +406,25 @@ class SettingsPage(BasePage):
         for key, value in values.items():
             self._settings.setValue(key, value)
         self._settings.sync()
-
         from minerva.logging_config import configure_logging
+        import logging
+        import logging.handlers
+
+        # Preserve the current console level so a --verbose/--debug launch
+        # isn't silently downgraded when the user changes the file log level.
+        console_level = None
+        for h in logging.getLogger().handlers:
+            if (
+                isinstance(h, logging.StreamHandler)
+                and not isinstance(h, logging.handlers.RotatingFileHandler)
+                and getattr(h, "_minerva_managed", False)
+            ):
+                console_level = h.level
+                break
+
+
         try:
-            configure_logging(draft.log_level)
+            configure_logging(draft.log_level, console_level=console_level)
         except Exception:
             pass
 

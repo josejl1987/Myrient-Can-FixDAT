@@ -106,9 +106,8 @@ def configure_logging(
             maxBytes=_MAX_BYTES,
             backupCount=_BACKUP_COUNT,
             encoding="utf-8",
+            errors="replace",
         )
-        file_handler.setLevel(logging.DEBUG)  # file always captures everything
-        file_handler.setFormatter(formatter)
         file_handler._minerva_managed = True  # type: ignore[attr-defined]
         root.addHandler(file_handler)
     except OSError:
