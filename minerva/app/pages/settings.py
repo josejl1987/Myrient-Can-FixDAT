@@ -24,18 +24,12 @@ from minerva.ui.widgets.surface_panel import SurfacePanel
 log = logging.getLogger(__name__)
 
 
-def _connection_task(url: str, username: str, password: str) -> str:
-    from minerva_qbit import QBittorrentClient
-
-    client = QBittorrentClient(url, username, password)
-    client.login()
-    return client.test_connection()
 
 
 class SettingsPage(BasePage):
     """Persistent settings editor with dirty-state protection and live preview."""
 
-    CATEGORIES = ("General", "Downloads", "qBittorrent", "Library", "Sources", "Appearance", "Advanced")
+    CATEGORIES = ("General", "Downloads", "Library", "Sources", "Appearance", "Advanced")
 
     def __init__(
         self,
@@ -62,24 +56,22 @@ class SettingsPage(BasePage):
         icons = {
             "General": Icons.settings(),
             "Downloads": Icons.download(),
-            "qBittorrent": Icons.queue(),
             "Library": Icons.library(),
             "Sources": Icons.external(),
             "Appearance": Icons.image(),
             "Advanced": Icons.database(),
         }
         for category in self.CATEGORIES:
-            self._category_list.addItem(QtWidgets.QListWidgetItem(icons[category], category))
-        self._category_list.currentRowChanged.connect(self._stack_category_changed)
-
+            item = QtWidgets.QListWidgetItem(icons[category], category)
+            self._category_list.addItem(item)
         self._pages = QtWidgets.QStackedWidget()
         self._pages.addWidget(self._build_general_page())
         self._pages.addWidget(self._build_downloads_page())
-        self._pages.addWidget(self._build_qbit_page())
         self._pages.addWidget(self._build_library_page())
         self._pages.addWidget(self._build_sources_page())
         self._pages.addWidget(self._build_appearance_page())
         self._pages.addWidget(self._build_advanced_page())
+        self._category_list.currentRowChanged.connect(self._pages.setCurrentIndex)
 
         body = QtWidgets.QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -166,33 +158,6 @@ class SettingsPage(BasePage):
         self._timeout.setRange(30, 86400)
         self._timeout.setSuffix(" sec")
         form.addRow("Timeout per batch", self._timeout)
-        card.body_layout.addLayout(form)
-        layout.addWidget(card)
-        layout.addStretch(1)
-        return self._scroll_page(container)
-
-    def _build_qbit_page(self) -> QtWidgets.QWidget:
-        container = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(container)
-        card = SurfacePanel("qBittorrent connection", icon=Icons.queue())
-        form = QtWidgets.QFormLayout()
-        self._qbit_url = QtWidgets.QLineEdit()
-        self._qbit_url.setPlaceholderText("http://127.0.0.1:8080")
-        self._qbit_user = QtWidgets.QLineEdit()
-        self._qbit_password = QtWidgets.QLineEdit()
-        self._qbit_password.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        form.addRow("Connection URL", self._qbit_url)
-        form.addRow("Username", self._qbit_user)
-        form.addRow("Password", self._qbit_password)
-        connection_row = QtWidgets.QHBoxLayout()
-        self._test_btn = QtWidgets.QPushButton(Icons.queue(), "Test connection")
-        self._test_btn.setObjectName("primaryButton")
-        self._test_btn.clicked.connect(self._on_test_connection)
-        self._connection_badge = StatusBadge("Not tested", BadgeKind.NEUTRAL)
-        connection_row.addWidget(self._test_btn)
-        connection_row.addWidget(self._connection_badge)
-        connection_row.addStretch(1)
-        form.addRow("", connection_row)
         card.body_layout.addLayout(form)
         layout.addWidget(card)
         layout.addStretch(1)
@@ -327,9 +292,6 @@ class SettingsPage(BasePage):
         self._torrent_picker.set_path(str(draft.torrent_directory))
         self._index_edit.setText(str(draft.index_path))
         self._cover_picker.set_path(str(draft.cover_directory))
-        self._qbit_url.setText(draft.qbit_url)
-        self._qbit_user.setText(draft.qbit_username)
-        self._qbit_password.setText(draft.qbit_password)
         self._keep_seeding.setChecked(draft.keep_seeding)
         self._hardlinks.setChecked(draft.create_hardlinks)
         self._preserve_partial.setChecked(draft.preserve_partial)
@@ -345,9 +307,6 @@ class SettingsPage(BasePage):
 
     def _form_to_draft(self) -> SettingsDraft:
         return SettingsDraft(
-            qbit_url=self._qbit_url.text().strip(),
-            qbit_username=self._qbit_user.text().strip(),
-            qbit_password=self._qbit_password.text(),
             output_directory=Path(self._output_picker.path().strip() or "downloads"),
             torrent_directory=Path(self._torrent_picker.path().strip()),
             index_path=Path(self._index_edit.text().strip()),
@@ -365,7 +324,7 @@ class SettingsPage(BasePage):
         )
 
     def _connect_dirty_signals(self) -> None:
-        for edit in (self._qbit_url, self._qbit_user, self._qbit_password, self._index_edit, self._output_picker.path_edit, self._torrent_picker.path_edit, self._cover_picker.path_edit):
+        for edit in (self._index_edit, self._output_picker.path_edit, self._torrent_picker.path_edit, self._cover_picker.path_edit):
             edit.textChanged.connect(self._on_form_changed)
         for combo in (self._theme, self._density, self._accent, self._download_method):
             combo.currentIndexChanged.connect(self._on_form_changed)
@@ -471,30 +430,6 @@ class SettingsPage(BasePage):
 
     # ── Actions ─────────────────────────────────────────────────────────
 
-    def _on_test_connection(self) -> None:
-        url = self._qbit_url.text().strip()
-        if not url.startswith(("http://", "https://")):
-            NotificationBanner.show_error(self, "Invalid URL", "Enter a valid HTTP(S) qBittorrent URL")
-            return
-        self._test_btn.setEnabled(False)
-        self._test_btn.setText("Testing…")
-        task = TaskRunner(_connection_task, url, self._qbit_user.text().strip(), self._qbit_password.text())
-        task.signals.result.connect(self._connection_success)
-        task.signals.error.connect(self._connection_failed)
-        self._pool.start(task)
-
-    def _connection_success(self, version: object) -> None:
-        self._test_btn.setEnabled(True)
-        self._test_btn.setText("Test connection")
-        self._connection_badge.setText(f"Connected · {version}")
-        self._connection_badge.set_kind(BadgeKind.SUCCESS)
-
-    def _connection_failed(self, details: str) -> None:
-        self._test_btn.setEnabled(True)
-        self._test_btn.setText("Test connection")
-        self._connection_badge.setText("Connection failed")
-        self._connection_badge.set_kind(BadgeKind.ERROR)
-        NotificationBanner.show_error(self, "Connection failed", details)
 
     def _preview_appearance(self, *_args) -> None:
         if self._loading:
@@ -513,10 +448,6 @@ class SettingsPage(BasePage):
         path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select index database", self._index_edit.text(), "SQLite database (*.db)")
         if path:
             self._index_edit.setText(path)
-
-    def _stack_category_changed(self, row: int) -> None:
-        if row >= 0:
-            self._pages.setCurrentIndex(row)
 
     def _on_migrate_legacy(self) -> None:
         old = QtCore.QSettings("MinervaFixDAT", "MinervaGUI")
