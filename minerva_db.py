@@ -1,0 +1,2382 @@
+"""
+Minerva Database Layer — Production grade
+==========================================
+Provides a robust, performant, and well-tested interface to the
+Minerva torrent index.
+
+Architecture:
+- Tiered matching: exact → FTS5 MATCH → FTS5 trigram → Python fuzzy
+- LRU cache with TTL for repeated queries
+- Schema versioning with automatic migration
+- Python logging (no print statements)
+- Comprehensive docstrings
+
+This module is UI-agnostic. The GUI lives in `minerva_gui.py`.
+"""
+from __future__ import annotations
+
+import contextlib
+import csv
+import datetime
+import logging
+import re
+import sqlite3
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Collection, Sequence
+
+# ── Domain type imports (graceful fallback for early bootstrap) ────────────────
+_HAS_DOMAIN = False
+try:
+    from minerva.domain.collections import (
+        CollectionStatus,
+        CollectionSummary,
+        IndexOverview,
+        SystemSummary,
+    )
+    from minerva.domain.downloads import DownloadFileSpec
+    from minerva.domain.library import (
+        FacetCount,
+        LibraryFacets,
+        LibraryItem,
+        LibraryQuery,
+    )
+    _HAS_DOMAIN = True
+except ImportError:
+    FacetCount = None  # type: ignore[assignment, misc]
+    LibraryFacets = None  # type: ignore[assignment, misc]
+    LibraryItem = None  # type: ignore[assignment, misc]
+    DownloadFileSpec = None  # type: ignore[assignment, misc]
+    LibraryQuery = None  # type: ignore[assignment, misc]
+    IndexOverview = None  # type: ignore[assignment, misc]
+    CollectionSummary = None  # type: ignore[assignment, misc]
+    SystemSummary = None  # type: ignore[assignment, misc]
+    CollectionStatus = None  # type: ignore[assignment, misc]
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+SCHEMA_VERSION = 3
+DEFAULT_TORRENT_DIR = Path("torrents/Minerva Myrient - 1050 torrents")
+DEFAULT_INDEX_PATH = Path("torrents/minerva_index.db")
+
+# Default cache settings
+CACHE_MAX_ENTRIES = 256
+CACHE_TTL_SECONDS = 300  # 5 minutes
+
+# Default match settings
+MAX_FUZZY_CANDIDATES = 200
+MIN_KEYWORD_LEN = 3
+FUZZY_KEYWORD_OVERLAP_THRESHOLD = 0.7  # 70% keyword overlap
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+log = logging.getLogger(__name__)
+
+
+def _ensure_parent_dir(db_path: str | Path) -> None:
+    """Create the parent directory of *db_path* if it doesn't exist.
+
+    Skips ``:memory:`` and URI-style (``file:...``) paths — only plain
+    filesystem paths are touched.  ``Path().parent.mkdir(parents=True,
+    exist_ok=True)`` is a safe no-op when the parent is ``"."``.
+    """
+    path = str(db_path)
+    if path == ":memory:" or path.startswith("file:"):
+        return
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+
+# Parsers moved to minerva.parsers package.
+# Re-exported here for backward compatibility.
+from minerva.parsers.torrent_bencode import bdecode, parse_torrent_files  # noqa: E402
+from minerva.parsers.dat_parser import (  # noqa: E402
+    COLLECTION_NO_INTRO,
+    COLLECTION_REDUMP,
+    COLLECTION_RETRO_ACHIEVEMENTS,
+    DatEntry,
+    DatInfo,
+    _clean_dat_system_name,
+    parse_dat_file,
+)
+from minerva.parsers.csv_parser import _is_fix_status, parse_rv_fix_csv  # noqa: E402
+
+
+
+
+
+
+
+
+
+
+# ── Title normalization & matching ──────────────────────────────────────────
+_PAREN_STRIP = re.compile(r"\s*\([^)]*\)")
+_PUNCT = re.compile(r"[.,!?;:'\"`]+")
+_BROS = re.compile(r"\bbrothers\b", re.IGNORECASE)
+_ID_WORD = re.compile(r"\bid\b")
+
+_DAT_PREFIX = re.compile(r"(?i)^(?:fixdat|romresolve\s+fixdat)\s*[—\-:]\s*|^(?:fixdat|romresolve\s+fixdat)[_\s-]*")
+_DAT_DATE_SUFFIX = re.compile(
+    r"\s*\((?:\d{8}-\d{6}|\d{4}-\d{2}-\d{2}(?:[ T]\d{2}[-:]\d{2}[-:]\d{2})?)\)$"
+)
+_DAT_META_SUFFIX = re.compile(
+    r"\s*\((?:Retool[^)]*|Fresh1G1R[^)]*|No-Intro[^)]*|Redump[^)]*|MAMERedump[^)]*|Hearto[^)]*)\)$",
+    re.IGNORECASE,
+)
+
+# Known No-Intro/Redump category tags found in filename parens
+KNOWN_TAGS = frozenset({
+    "aftermarket", "alt", "bad", "beta", "bios", "bizarre", "classi",
+    "cracked", "demo", "debug", "enhancement", "homebrew", "inventory",
+    "pirate", "preproduction", "promo", "prototype", "private", "sample",
+    "sec", "trainer", "translation", "unl", "versus",
+})
+
+_TAG_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9 .]{1,30})\)")
+
+
+def extract_tags(stem: str) -> set[str]:
+    """Extract known category tags from a filename stem.
+
+    Tags appear in parentheses in standard ROM naming, e.g.
+    ``Super Mario Bros (World) (Aftermarket).gb`` → ``{"aftermarket"}``.
+
+    Returns:
+        Set of lowercase known tag names found in the stem.
+    """
+    matches = _TAG_RE.findall(stem)
+    return {m.lower().strip() for m in matches if m.lower().strip() in KNOWN_TAGS}
+
+
+# Stopwords for keyword extraction
+_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or",
+    "with", "by", "from", "is", "as", "but", "edition", "ver", "version",
+    "rev", "prototype", "proto", "sample", "demo", "beta", "aftermarket",
+    "unl", "homebrew", "private", "np", "kiosk",
+    "world", "usa", "europe", "japan", "germany", "france", "spain",
+    "italy", "netherlands", "australia", "canada", "brazil", "china",
+    "taiwan", "korea", "russia",
+    "sgb", "gb", "gba", "nes", "snes", "n64", "ps1", "ps2", "psp",
+    "enhanced", "compatible", "multiboot", "play", "yan", "video",
+    "ereader", "bll", "lnx", "lyx", "a78", "bin", "cof", "j64", "jag",
+    "abs", "rom", "en", "fr", "de", "es", "it", "nl", "pt", "sv", "da",
+    "fi", "no", "rumble",
+})
+
+
+def stem_from_romname(name: str) -> str:
+    """Strip extension and lowercase → stem for DB lookup."""
+    return re.sub(r"\.[^.]+$", "", name).lower()
+
+
+
+
+
+# core_title and title_keywords moved to minerva.matching.scoring.
+# Re-exported here for backward compatibility with callers importing
+# from minerva_db (e.g. report_acquisition.py, tests).
+from minerva.matching.scoring import core_title, title_keywords  # noqa: E402
+
+
+def fts_escape(term: str) -> str:
+    """Escape a term for safe use in FTS5 MATCH query."""
+    # FTS5 syntax: quote terms that contain special chars
+    return f'"{term.replace(chr(34), chr(34)+chr(34))}"'
+
+
+def stems_match(a_stem: str, b_stem: str) -> bool:
+    """Check if two stems refer to the same game title.
+
+    Tries exact, core_title, and keyword overlap.
+    """
+    if a_stem == b_stem:
+        return True
+    ca, cb = core_title(a_stem), core_title(b_stem)
+    if ca == cb:
+        return True
+    ka, kb = title_keywords(a_stem), title_keywords(b_stem)
+    if not ka or not kb:
+        return False
+    overlap = ka & kb
+    longer = max(len(ka), len(kb))
+    if longer == 0:
+        return False
+    if len(overlap) / longer >= FUZZY_KEYWORD_OVERLAP_THRESHOLD:
+        return True
+    if len(overlap) >= 3 and (overlap == ka or overlap == kb):
+        return True
+    return False
+
+
+def extract_regions(stem: str) -> set[str]:
+    """Extract region tags from a filename stem.
+
+    Parses parenthesized region codes: (USA), (Europe), (Japan), etc.
+    Returns a set of lowercase region codes.
+    """
+    regions: set[str] = set()
+    for part in re.findall(r'\(([^)]+)\)', stem):
+        part_clean = part.strip().lower()
+        known = {
+            "usa", "europe", "japan", "world", "asia", "australia",
+            "brazil", "china", "france", "germany", "greece",
+            "hong kong", "italy", "korea", "netherlands", "russia",
+            "scandinavia", "spain", "sweden", "taiwan", "ukraine",
+            "united kingdom", "usa & europe", "usa/europe", "usa+europe",
+            "world & usa/europe",
+        }
+        if part_clean in known:
+            regions.add(part_clean)
+    return regions
+
+
+def _backfill_facets(conn: sqlite3.Connection, batch_size: int = 10_000) -> None:
+    """Populate v3 tag and region tables without loading the full index."""
+    cursor = conn.execute("SELECT id, stem FROM files ORDER BY id")
+    while True:
+        rows = cursor.fetchmany(batch_size)
+        if not rows:
+            break
+        tag_rows: list[tuple[int, str]] = []
+        region_rows: list[tuple[int, str]] = []
+        for file_id, stem in rows:
+            tag_rows.extend((file_id, tag) for tag in extract_tags(stem))
+            region_rows.extend((file_id, region) for region in extract_regions(stem))
+        if tag_rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO file_tags (file_id, tag) VALUES (?, ?)",
+                tag_rows,
+            )
+        if region_rows:
+            conn.executemany(
+                "INSERT OR IGNORE INTO file_regions (file_id, region) VALUES (?, ?)",
+                region_rows,
+            )
+
+
+def resolve_match_scope(
+    dat_collection: str | None,
+    dat_system: str | None,
+    ui_collection: str = "",
+    ui_system: str = "",
+) -> tuple[str, str]:
+    """Resolve match scope, preferring explicit user filters.
+
+    A user-selected filter from the UI wins when it is non-empty and not
+    the sentinel ``"All"``. Otherwise, fall back to the collection/system
+    inferred from the DAT/XML header by ``parse_dat_file``.
+
+    This prevents cross-system false positives like a GBA fix DAT matching
+    a 3DS title when the UI filter is set to "All".
+
+    Returns:
+        (collection, system) — both empty strings mean "no scope".
+    """
+    def _pick(ui: str, dat: str | None) -> str:
+        if ui and ui != "All":
+            return ui
+        return dat or ""
+    return _pick(ui_collection, dat_collection), _pick(ui_system, dat_system)
+
+
+# ── LRU Cache ────────────────────────────────────────────────────────────────
+class LRUCache:
+    """Simple LRU cache with TTL.
+
+    Not thread-safe. Use one per thread.
+    """
+
+    def __init__(self, max_entries: int = CACHE_MAX_ENTRIES, ttl: int = CACHE_TTL_SECONDS):
+        self._max = max_entries
+        self._ttl = ttl
+        self._data: dict = {}
+        self._order: list = []  # insertion order (LRU at front)
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, key: tuple) -> Any | None:
+        """Get a value. Returns (value, expiry_time) or None."""
+        if key in self._data:
+            value, expiry = self._data[key]
+            if time.time() < expiry:
+                # Move to back (most recently used)
+                self._order.remove(key)
+                self._order.append(key)
+                self.hits += 1
+                return value
+            # Expired
+            del self._data[key]
+            self._order.remove(key)
+        self.misses += 1
+        return None
+
+    def put(self, key: tuple, value: Any) -> None:
+        """Store a value. Evicts oldest if at capacity."""
+        if key in self._data:
+            self._order.remove(key)
+        elif len(self._order) >= self._max:
+            # Evict LRU
+            oldest = self._order.pop(0)
+            del self._data[oldest]
+        expiry = time.time() + self._ttl
+        self._data[key] = (value, expiry)
+        self._order.append(key)
+
+    def clear(self) -> None:
+        self._data.clear()
+        self._order.clear()
+        self.hits = 0
+        self.misses = 0
+
+    def stats(self) -> dict:
+        total = self.hits + self.misses
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "size": len(self._data),
+            "capacity": self._max,
+            "hit_rate": self.hits / total if total else 0.0,
+        }
+
+
+# ── SQLite schema and migration ─────────────────────────────────────────────
+SCHEMA_V2 = """
+-- Schema version
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '2');
+INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('created', datetime('now'));
+
+-- Main files table
+CREATE TABLE files (
+    id INTEGER PRIMARY KEY,
+    stem TEXT NOT NULL,
+    basename TEXT NOT NULL,
+    torrent TEXT NOT NULL,
+    select_idx INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    path_full TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    system TEXT NOT NULL
+);
+CREATE UNIQUE INDEX idx_files_unique ON files(torrent, select_idx);
+CREATE INDEX idx_files_stem ON files(stem);
+CREATE INDEX idx_files_collection ON files(collection);
+CREATE INDEX idx_files_system ON files(system);
+CREATE INDEX idx_files_coll_sys ON files(collection, system);
+CREATE INDEX idx_files_size ON files(size);
+
+-- FTS5 full-text search on stems
+CREATE VIRTUAL TABLE files_fts USING fts5(
+    stem,
+    content='files',
+    content_rowid='id',
+    tokenize='porter unicode61'
+);
+
+-- FTS5 trigram for substring matching
+CREATE VIRTUAL TABLE files_trigram USING fts5(
+    stem,
+    content='files',
+    content_rowid='id',
+    tokenize='trigram'
+);
+
+-- Sync triggers for FTS5
+CREATE TRIGGER files_ai AFTER INSERT ON files BEGIN
+    INSERT INTO files_fts(rowid, stem) VALUES (new.id, new.stem);
+    INSERT INTO files_trigram(rowid, stem) VALUES (new.id, new.stem);
+END;
+
+CREATE TRIGGER files_ad AFTER DELETE ON files BEGIN
+    INSERT INTO files_fts(files_fts, rowid, stem) VALUES('delete', old.id, old.stem);
+    INSERT INTO files_trigram(files_trigram, rowid, stem) VALUES('delete', old.id, old.stem);
+END;
+
+CREATE TRIGGER files_au AFTER UPDATE ON files BEGIN
+    INSERT INTO files_fts(files_fts, rowid, stem) VALUES('delete', old.id, old.stem);
+    INSERT INTO files_fts(rowid, stem) VALUES (new.id, new.stem);
+    INSERT INTO files_trigram(files_trigram, rowid, stem) VALUES('delete', old.id, old.stem);
+    INSERT INTO files_trigram(rowid, stem) VALUES (new.id, new.stem);
+END;
+
+-- Torrents table
+CREATE TABLE torrents (
+    name TEXT PRIMARY KEY,
+    collection TEXT NOT NULL,
+    system TEXT NOT NULL,
+    file_count INTEGER NOT NULL
+);
+CREATE INDEX idx_torrents_coll_sys ON torrents(collection, system);
+"""
+
+SCHEMA_V3 = SCHEMA_V2 + """
+CREATE TABLE IF NOT EXISTS file_tags (
+    file_id INTEGER NOT NULL,
+    tag TEXT NOT NULL,
+    PRIMARY KEY(file_id, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_file_tags_tag_file
+    ON file_tags(tag, file_id);
+
+CREATE TABLE IF NOT EXISTS file_regions (
+    file_id INTEGER NOT NULL,
+    region TEXT NOT NULL,
+    PRIMARY KEY(file_id, region)
+);
+CREATE INDEX IF NOT EXISTS idx_file_regions_region_file
+    ON file_regions(region, file_id);
+
+CREATE TABLE IF NOT EXISTS index_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    status TEXT NOT NULL,
+    torrent_count INTEGER NOT NULL DEFAULT 0,
+    file_count INTEGER NOT NULL DEFAULT 0,
+    error_count INTEGER NOT NULL DEFAULT 0,
+    elapsed_ms INTEGER
+);
+
+INSERT OR REPLACE INTO schema_meta (key, value)
+VALUES ('schema_version', '3');
+"""
+
+# v1 schema (for migration)
+SCHEMA_V1 = """
+CREATE TABLE files (
+    stem TEXT NOT NULL,
+    basename TEXT NOT NULL,
+    torrent TEXT NOT NULL,
+    select_idx INTEGER NOT NULL,
+    size INTEGER NOT NULL,
+    path_full TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    system TEXT NOT NULL
+);
+CREATE INDEX idx_files_stem ON files(stem);
+CREATE INDEX idx_files_coll ON files(collection);
+CREATE INDEX idx_files_sys ON files(system);
+CREATE TABLE torrents (
+    name TEXT PRIMARY KEY,
+    collection TEXT NOT NULL,
+    system TEXT NOT NULL,
+    file_count INTEGER NOT NULL
+);
+"""
+
+
+def get_schema_version(conn: sqlite3.Connection) -> int:
+    """Detect the schema version of the database. Returns 0 if unknown."""
+    try:
+        row = conn.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row:
+            return int(row[0])
+    except sqlite3.OperationalError:
+        pass
+    # Heuristic: check for v1 tables
+    try:
+        conn.execute("SELECT 1 FROM files LIMIT 1")
+        conn.execute("SELECT 1 FROM torrents LIMIT 1")
+        return 1
+    except sqlite3.OperationalError:
+        return 0
+
+
+def build_index(
+    torrent_dir: Path = DEFAULT_TORRENT_DIR,
+    index_path: Path = DEFAULT_INDEX_PATH,
+    *,
+    progress_callback: "Callable[[int, int], None] | None" = None,
+) -> Path:
+    """Build the SQLite index from all .torrent files.
+
+    Args:
+        torrent_dir: Directory containing .torrent files.
+        index_path: Where to write the SQLite index.
+        progress_callback: Optional callback(current, total) invoked after
+            each torrent file is processed.
+
+    Returns:
+        The path to the created index.
+    """
+    if not torrent_dir.is_dir():
+        raise FileNotFoundError(f"Torrent directory not found: {torrent_dir}")
+
+    files = sorted(torrent_dir.glob("*.torrent"))
+    log.info("Building index from %d torrents in %s", len(files), torrent_dir)
+
+    if index_path.exists():
+        log.info("Removing existing index: %s", index_path)
+        index_path.unlink()
+
+    _ensure_parent_dir(index_path)
+    conn = sqlite3.connect(str(index_path))
+    conn.execute("PRAGMA journal_mode = OFF")
+    conn.execute("PRAGMA synchronous = OFF")
+    conn.execute("PRAGMA cache_size = -8000000")  # 8 MB cache
+
+    # Apply the current schema directly for newly-built indexes.
+    conn.executescript(SCHEMA_V3)
+    run_started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    run_id = conn.execute(
+        "INSERT INTO index_runs (started_at, status) VALUES (?, 'running')",
+        (run_started,),
+    ).lastrowid
+
+    def extract_cs(name: str) -> tuple[str, str]:
+        inner = name.replace(".torrent", "", 1)
+        if inner.startswith("Minerva_Myrient - "):
+            inner = inner[len("Minerva_Myrient - "):]
+        parts = inner.split(" - ", 1)
+        return parts[0] if parts else "Unknown", (parts[1] if len(parts) > 1 else name)
+
+    total = errors = 0
+    t0 = time.time()
+    for tf in files:
+        try:
+            entries = parse_torrent_files(tf)
+            if not entries:
+                if progress_callback is not None:
+                    progress_callback(files.index(tf) + 1, len(files))
+                continue
+            coll, sys_name = extract_cs(tf.name)
+            rows = [
+                (e["stem"].lower(), e["basename"], tf.name,
+                 e["select_index"], e["size"], e["path_in_torrent"],
+                 coll, sys_name)
+                for e in entries
+            ]
+            conn.executemany(
+                "INSERT INTO files (stem, basename, torrent, select_idx, size, path_full, collection, system) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            conn.execute(
+                "INSERT OR REPLACE INTO torrents (name, collection, system, file_count) "
+                "VALUES (?, ?, ?, ?)",
+                (tf.name, coll, sys_name, len(entries)))
+
+            # Populate v3 facets while the torrent-sized working set is small.
+            inserted = conn.execute(
+                "SELECT id, stem FROM files WHERE torrent = ?",
+                (tf.name,),
+            ).fetchall()
+            tag_rows: list[tuple[int, str]] = []
+            region_rows: list[tuple[int, str]] = []
+            for inserted_row in inserted:
+                file_id = inserted_row[0]
+                stem = inserted_row[1]
+                tag_rows.extend((file_id, tag) for tag in extract_tags(stem))
+                region_rows.extend((file_id, region) for region in extract_regions(stem))
+            if tag_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO file_tags (file_id, tag) VALUES (?, ?)",
+                    tag_rows,
+                )
+            if region_rows:
+                conn.executemany(
+                    "INSERT OR IGNORE INTO file_regions (file_id, region) VALUES (?, ?)",
+                    region_rows,
+                )
+            total += len(entries)
+        except Exception as e:
+            log.error("Failed to parse %s: %s", tf.name, e)
+            errors += 1
+        finally:
+            if progress_callback is not None:
+                progress_callback(files.index(tf) + 1, len(files))
+
+    elapsed = time.time() - t0
+    conn.execute(
+        """
+        UPDATE index_runs
+        SET completed_at = ?, status = 'completed', torrent_count = ?,
+            file_count = ?, error_count = ?, elapsed_ms = ?
+        WHERE id = ?
+        """,
+        (
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            len(files), total, errors, int(elapsed * 1000), run_id,
+        ),
+    )
+    conn.commit()
+
+    # Stats
+    unique_stems = conn.execute(
+        "SELECT COUNT(DISTINCT stem) FROM files").fetchone()[0]
+    torrent_count = conn.execute(
+        "SELECT COUNT(*) FROM torrents").fetchone()[0]
+    fts_count = conn.execute(
+        "SELECT COUNT(*) FROM files_fts").fetchone()[0]
+
+    log.info(
+        "Built index: %d files, %d torrents, %d unique stems, %d FTS entries in %.1fs",
+        total, torrent_count, unique_stems, fts_count, elapsed)
+    if errors:
+        log.warning("%d torrents had parse errors", errors)
+
+    size_mb = index_path.stat().st_size / 1024 / 1024
+    log.info("Index file: %s (%.1f MB)", index_path, size_mb)
+
+    conn.close()
+    return index_path
+
+
+def migrate_v1_to_v2(index_path: Path) -> None:
+    """Migrate a v1 index to v2 schema in-place.
+
+    Adds id column, FTS5 tables, and triggers. This is destructive
+    (rebuilds the table) but preserves all data.
+    """
+    log.info("Migrating %s from v1 to v2", index_path)
+    conn = sqlite3.connect(str(index_path))
+    conn.execute("PRAGMA journal_mode = OFF")
+    conn.execute("PRAGMA synchronous = OFF")
+
+    # Read all v1 data
+    rows = conn.execute(
+        "SELECT stem, basename, torrent, select_idx, size, path_full, collection, system "
+        "FROM files"
+    ).fetchall()
+    torrent_rows = conn.execute(
+        "SELECT name, collection, system, file_count FROM torrents"
+    ).fetchall()
+
+    log.info("Migrating %d file rows + %d torrent rows", len(rows), len(torrent_rows))
+
+    # Drop all v1 tables
+    conn.executescript("""
+        DROP TABLE IF EXISTS files;
+        DROP TABLE IF EXISTS torrents;
+        DROP INDEX IF EXISTS idx_files_stem;
+        DROP INDEX IF EXISTS idx_files_coll;
+        DROP INDEX IF EXISTS idx_files_sys;
+    """)
+
+    # Apply the current schema directly for newly-built indexes.
+    conn.executescript(SCHEMA_V3)
+    run_started = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    run_id = conn.execute(
+        "INSERT INTO index_runs (started_at, status) VALUES (?, 'running')",
+        (run_started,),
+    ).lastrowid
+
+    # Re-insert data
+    if rows:
+        conn.executemany(
+            "INSERT INTO files (id, stem, basename, torrent, select_idx, size, path_full, collection, system) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(i + 1,) + r for i, r in enumerate(rows)])
+    if torrent_rows:
+        conn.executemany(
+            "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
+            torrent_rows)
+    _backfill_facets(conn)
+    conn.execute(
+        """
+        UPDATE index_runs
+        SET completed_at = ?, status = 'completed', torrent_count = ?,
+            file_count = ?, error_count = 0, elapsed_ms = 0
+        WHERE id = ?
+        """,
+        (
+            datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            len(torrent_rows), len(rows), run_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+    log.info("Migration complete")
+
+
+# ── Main database interface ──────────────────────────────────────────────────
+@dataclass(frozen=True)
+class StemSizeMatch:
+    file_id: int
+    collection: str
+    system: str
+    basename: str
+    size: int
+    path_full: str = ""
+
+
+@dataclass
+class MatchResult:
+    """Result of matching a single DAT entry against the index."""
+    dat_entry: DatEntry
+    matched_rows: list[sqlite3.Row] = field(default_factory=list)
+    matched_via: str = ""  # "exact", "fts5", "trigram", "keyword"
+
+
+@dataclass
+class MatchReport:
+    """Summary of matching an entire DAT against the index."""
+    matched: list[sqlite3.Row]            # Unique matched rows (deduplicated)
+    matched_stems: set[str]              # Stems that had at least one match
+    unmatched: list[DatEntry]            # Entries that didn't match
+    results: list[MatchResult]           # Per-entry results
+    total_time_ms: float = 0.0
+
+    def __str__(self) -> str:
+        return (
+            f"MatchReport(matched={len(self.matched)}, "
+            f"matched_stems={len(self.matched_stems)}, "
+            f"unmatched={len(self.unmatched)}, time={self.total_time_ms:.0f}ms)"
+        )
+
+
+class MinervaDB:
+    """Production-grade interface to the Minerva torrent index.
+
+    Thread-safety: Each thread should create its own instance.
+    Connection management: opens connections per-call (cheap with SQLite).
+    """
+
+    def __init__(
+        self,
+        db_path: Path | str = DEFAULT_INDEX_PATH,
+        cache_max: int = CACHE_MAX_ENTRIES,
+        cache_ttl: int = CACHE_TTL_SECONDS,
+        *,
+        _connect: bool = True,
+    ):
+        self._path = str(db_path)
+        self._cache = LRUCache(max_entries=cache_max, ttl=cache_ttl)
+        self._ready = False
+        if _connect:
+            self.connect()
+
+    @property
+    def ready(self) -> bool:
+        """True if the index DB has a valid schema and files table."""
+        return self._ready
+
+    @property
+    def path(self) -> str:
+        """The filesystem path of the index database this instance was opened with."""
+        return self._path
+    @classmethod
+    def open(
+        cls,
+        db_path: Path | str = DEFAULT_INDEX_PATH,
+        cache_max: int = CACHE_MAX_ENTRIES,
+        cache_ttl: int = CACHE_TTL_SECONDS,
+    ) -> MinervaDB:
+        """Create and connect to the index database.
+
+        Alias for the normal constructor; useful when you want to be
+        explicit that I/O is about to happen.
+        """
+        return cls(db_path, cache_max, cache_ttl, _connect=True)
+
+    def connect(self) -> None:
+        """Validate/migrate the schema and mark the DB as ready.
+
+        Idempotent: safe to call more than once.
+        """
+        _ensure_parent_dir(self._path)
+        self._validate_schema()
+        log.debug("MinervaDB initialized: %s", self._path)
+
+    @contextlib.contextmanager
+    def conn(self) -> sqlite3.Connection:
+        """Open a new connection as a context manager.
+
+        Yields a connection that is committed on clean exit, rolled back
+        on exception, and always closed — preventing the connection leak
+        that ``with sqlite3.connect() as c:`` causes (its ``__exit__``
+        only commits/rolls back, never closes).
+        """
+        _ensure_parent_dir(self._path)
+        c = sqlite3.connect(self._path)
+        try:
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA busy_timeout = 5000")
+            c.execute("PRAGMA mmap_size = 268435456")
+            c.execute("PRAGMA temp_store = MEMORY")
+            c.execute("PRAGMA cache_size = -64000")
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
+
+    def _validate_schema(self) -> None:
+        """Verify the database is at the expected schema version and migrate if needed."""
+        try:
+            with self.conn() as c:
+                self._ensure_schema(c)
+                version = get_schema_version(c)
+                if version > SCHEMA_VERSION:
+                    log.warning(
+                        "Database at schema v%d, newer than expected v%d. Some features may not work.",
+                        version, SCHEMA_VERSION)
+                else:
+                    log.debug("Schema v%d OK", version)
+                # Ensure filter-performance indexes exist on existing databases.
+                # Skip when the files table is absent (uninitialized DB); a fresh
+                # DB gets its full schema from build_index(), not from here.
+                if c.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='files'"
+                ).fetchone():
+                    self._ready = True
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_files_collection ON files(collection)")
+                    c.execute("CREATE INDEX IF NOT EXISTS idx_files_system ON files(system)")
+        except sqlite3.OperationalError as e:
+            log.error("Cannot open database: %s", e)
+            raise
+
+    # ── Schema migration ───────────────────────────────────────────────────
+
+    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        """Run schema migrations if needed.
+
+        Checks the current schema version and applies any pending migrations.
+        """
+        version = get_schema_version(conn)
+        if version < SCHEMA_VERSION:
+            if version == 2:
+                self._migrate_v2_to_v3(conn)
+                conn.execute(
+                    "INSERT OR REPLACE INTO schema_meta (key, value) "
+                    "VALUES ('schema_version', '3')"
+                )
+                conn.commit()
+                log.info("Schema migrated from v2 to v3")
+            else:
+                log.warning(
+                    "Database at schema v%d, expected v%d. Run build_index() to upgrade.",
+                    version, SCHEMA_VERSION)
+
+    def _migrate_v2_to_v3(self, conn: sqlite3.Connection) -> None:
+        """Migrate schema from v2 to v3: add file_tags, file_regions, index_runs."""
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS file_tags (
+                file_id INTEGER NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY(file_id, tag)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_tags_tag_file "
+            "ON file_tags(tag, file_id)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS file_regions (
+                file_id INTEGER NOT NULL,
+                region TEXT NOT NULL,
+                PRIMARY KEY(file_id, region)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_file_regions_region_file "
+            "ON file_regions(region, file_id)"
+        )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS index_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                status TEXT NOT NULL,
+                torrent_count INTEGER NOT NULL DEFAULT 0,
+                file_count INTEGER NOT NULL DEFAULT 0,
+                error_count INTEGER NOT NULL DEFAULT 0,
+                elapsed_ms INTEGER
+            )
+        """)
+        _backfill_facets(conn)
+        conn.execute("PRAGMA user_version = 3")
+
+    # ── Public API ─────────────────────────────────────────────────────────
+    def get_collections(self) -> list[str]:
+        """Return sorted list of distinct collections."""
+        if not self._ready:
+            return []
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT collection FROM files ORDER BY collection"
+            ).fetchall()
+            return [r["collection"] for r in rows]
+
+    def get_collection_system_pairs(self) -> list[tuple[str, str]]:
+        """Return all distinct (collection, system) pairs sorted by collection then system."""
+        if not self._ready:
+            return []
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT collection, system FROM files ORDER BY collection, system"
+            ).fetchall()
+            return [(r["collection"], r["system"]) for r in rows]
+
+    def get_systems(self, collection: str | None = None) -> list[str]:
+        """Return sorted list of distinct systems, optionally filtered by collection."""
+        if not self._ready:
+            return []
+        with self.conn() as c:
+            if collection:
+                rows = c.execute(
+                    "SELECT DISTINCT system FROM files WHERE collection = ? ORDER BY system",
+                    (collection,)).fetchall()
+            else:
+                rows = c.execute(
+                    "SELECT DISTINCT system FROM files ORDER BY system").fetchall()
+            return [r["system"] for r in rows]
+
+    def get_tags(self) -> list[str]:
+        """Return sorted list of distinct tags from the file_tags table."""
+        if not self._ready:
+            return []
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT tag FROM file_tags ORDER BY tag"
+            ).fetchall()
+            return [r["tag"] for r in rows]
+
+    def search(
+        self,
+        query: str = "",
+        collection: str = "",
+        system: str = "",
+        limit: int = 500,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Search the file index by stem substring.
+
+        Returns:
+            (rows, total_count)
+        """
+        q = query.strip().lower()
+        filters: list[str] = []
+        filter_params: list = []
+        if collection:
+            filters.append("collection = ?")
+            filter_params.append(collection)
+        if system:
+            filters.append("system = ?")
+            filter_params.append(system)
+
+        def _apply_filters(base_sql: str) -> tuple[str, list]:
+            if filters:
+                return f"{base_sql} AND {' AND '.join(filters)}", filter_params.copy()
+            return base_sql, []
+
+        with self.conn() as c:
+            if q and len(q) >= 3:
+                # Fast path: trigram FTS handles substring searches without a full scan.
+                match_expr = fts_escape(q)
+                count_sql, count_params = _apply_filters(
+                    "SELECT COUNT(*) FROM files WHERE id IN (SELECT rowid FROM files_trigram WHERE files_trigram MATCH ?)"
+                )
+                total = c.execute(count_sql, [match_expr, *count_params]).fetchone()[0]
+                rows_sql, rows_params = _apply_filters(
+                    "SELECT * FROM files WHERE id IN (SELECT rowid FROM files_trigram WHERE files_trigram MATCH ?)"
+                )
+                rows = c.execute(
+                    f"{rows_sql} ORDER BY size DESC LIMIT ? OFFSET ?",
+                    [match_expr, *rows_params, limit, offset],
+                ).fetchall()
+                return rows, total
+
+            # Small or empty queries: fall back to LIKE (cheap enough for the
+            # very small candidate set a 1-2 character query would otherwise match).
+            where: list[str] = []
+            params: list = []
+            if q:
+                where.append("stem LIKE ?")
+                params.append(f"%{q}%")
+            where.extend(filters)
+            params.extend(filter_params)
+            w = " AND ".join(where) if where else "1=1"
+            total = c.execute(
+                f"SELECT COUNT(*) FROM files WHERE {w}", params
+            ).fetchone()[0]
+            rows = c.execute(
+                f"SELECT * FROM files WHERE {w} ORDER BY size DESC LIMIT ? OFFSET ?",
+                [*params, limit, offset]).fetchall()
+            return rows, total
+
+    # ── Tag-based search ──────────────────────────────────────────────────────
+
+    def search_by_tags(
+        self,
+        tags: list[str] | None = None,
+        systems: list[str] | None = None,
+        collection: str = "",
+        query: str = "",
+        min_size: int = 0,
+        max_size: int = 0,
+        limit: int = 0,
+        offset: int = 0,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Search the index for files matching tags and optional filters.
+
+        Tags are extracted from filename stems, e.g. ``(Aftermarket)``.
+        Uses FTS5 trigram for fast substring matching.
+
+        Args:
+            tags: Filter by known category tags (OR logic).
+            systems: Filter by system name (OR logic).
+            collection: Optional collection filter.
+            query: Optional title substring filter.
+            min_size: Minimum size in bytes (0 = no minimum).
+            max_size: Maximum size in bytes (0 = no maximum).
+            limit: Max rows (0 = no limit).
+            offset: Pagination offset.
+
+        Returns:
+            (rows, total_count)
+        """
+        has_any_filter = bool(tags or systems or collection or query or min_size or max_size)
+        if not has_any_filter:
+            return self.search(limit=limit, offset=offset)
+
+        with self.conn() as c:
+            # Step 1: collect matching rowids from trigram for tags/query.
+            rowid_filters: list[list[int]] = []
+            for tag in tags or []:
+                tag_clean = tag.lower().strip("()")
+                escaped = fts_escape(tag_clean)
+                rowids = c.execute(
+                    "SELECT rowid FROM files_trigram WHERE files_trigram MATCH ?",
+                    (escaped,),
+                ).fetchall()
+                ids = [r[0] for r in rowids]
+                if not ids:
+                    return [], 0
+                rowid_filters.append(ids)
+
+            q = query.strip().lower()
+            if q and len(q) >= 3:
+                escaped = fts_escape(q)
+                rowids = c.execute(
+                    "SELECT rowid FROM files_trigram WHERE files_trigram MATCH ?",
+                    (escaped,),
+                ).fetchall()
+                ids = [r[0] for r in rowids]
+                if not ids:
+                    return [], 0
+                rowid_filters.append(ids)
+
+            # Step 2: build filter query.
+            parts: list[str] = []
+            params: list[Any] = []
+
+            if rowid_filters:
+                common_ids: set[int] = set(rowid_filters[0])
+                for subset in rowid_filters[1:]:
+                    common_ids &= set(subset)
+                if not common_ids:
+                    return [], 0
+                sorted_ids = sorted(common_ids)
+                placeholders = ",".join("?" * len(sorted_ids))
+                parts.append(f"id IN ({placeholders})")
+                params.extend(sorted_ids)
+
+            if systems:
+                sys_placeholders = ",".join("?" * len(systems))
+                parts.append(f"system IN ({sys_placeholders})")
+                params.extend(systems)
+
+            if collection:
+                parts.append("collection = ?")
+                params.append(collection)
+
+            if min_size > 0:
+                parts.append("size >= ?")
+                params.append(min_size)
+
+            if max_size > 0:
+                parts.append("size <= ?")
+                params.append(max_size)
+
+            if q and len(q) < 3:
+                parts.append("stem LIKE ?")
+                params.append(f"%{q}%")
+
+            where = " AND ".join(parts) if parts else "1=1"
+
+            total = c.execute(
+                f"SELECT COUNT(*) FROM files WHERE {where}", params
+            ).fetchone()[0]
+
+            sql = f"SELECT * FROM files WHERE {where} ORDER BY size DESC"
+            if limit > 0:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([limit, offset])
+
+            rows = c.execute(sql, params).fetchall()
+            return rows, total
+
+    def build_synthetic_dat(
+        self,
+        rows: list[sqlite3.Row],
+        dat_name: str = "Synthetic DAT",
+        system: str | None = None,
+        collection: str | None = None,
+    ) -> str:
+        """Build a valid logiqx/clrmamepro XML DAT string from index rows.
+
+        The output is compatible with ``parse_dat_file()`` and with retool.
+
+        Args:
+            rows: Index rows from ``search_by_tags()`` or similar.
+            dat_name: Name for the DAT header.
+            system: Optional system label. Included in header if provided.
+            collection: Optional collection label. Included in header if provided.
+
+        Returns:
+            XML string representing a valid .dat file.
+        """
+        root = ET.Element("datafile")
+        header = ET.SubElement(root, "header")
+        ET.SubElement(header, "name").text = dat_name
+        if system:
+            ET.SubElement(header, "description").text = system
+        if collection:
+            ET.SubElement(header, "version").text = collection
+        ET.SubElement(header, "url").text = "https://no-intro.org/"
+
+        for row in rows:
+            game = ET.SubElement(root, "game", name=row["stem"])
+            ET.SubElement(game, "description").text = row["stem"]
+            ET.SubElement(
+                game, "rom",
+                name=row["basename"],
+                size=str(row["size"]),
+            )
+
+        return ET.tostring(root, encoding="unicode", xml_declaration=True)
+
+    # ── DAT matching ──────────────────────────────────────────────────────────
+
+    def match_dat(
+        self,
+        entries: list[DatEntry] | tuple[DatEntry, ...],
+        collection: str = "",
+        system: str = "",
+        use_cache: bool = True,
+    ) -> MatchReport:
+        """Match a list of DAT entries against the index.
+
+        Args:
+            entries: List of DatEntry objects from a parsed DAT.
+            collection: Optional collection scope (e.g. "No-Intro").
+            system: Optional system scope (e.g. "Nintendo - Game Boy Color").
+            use_cache: Whether to use the LRU cache.
+
+        Returns:
+            MatchReport with matched rows, unmatched entries, and per-entry results.
+        """
+        if not self._ready:
+            return MatchReport(matched=[], matched_stems=set(), unmatched=list(entries), results=[])
+        t0 = time.time()
+
+        # Check cache
+        cache_key = ("match", tuple(e.filename for e in entries), collection, system)
+        if use_cache:
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                log.debug("Cache hit for match_dat (%d entries)", len(entries))
+                return cached
+
+        seen: set[tuple[str, int]] = set()
+        matched: list[sqlite3.Row] = []
+        matched_stems: set[str] = set()
+        unmatched: list[DatEntry] = []
+        results: list[MatchResult] = []
+
+        # Use a single connection for the whole match — reduces connection
+        # open/close overhead from O(entries × 4) to O(1).
+        with self.conn() as conn:
+            for entry in entries:
+                stem = stem_from_romname(entry.filename)
+                size = entry.size
+                mr = MatchResult(dat_entry=entry)
+
+                # Tier 1: exact stem match
+                rows = self._find_by_stem(stem, collection, system, conn, size=size)
+                if rows:
+                    for r in rows:
+                        key = (r["torrent"], r["select_idx"])
+                        if key not in seen:
+                            seen.add(key)
+                            matched.append(r)
+                        mr.matched_rows.append(r)
+                    mr.matched_via = "exact"
+                    matched_stems.add(stem)
+                    results.append(mr)
+                    continue
+
+                # Tier 2: FTS5 MATCH query
+                rows = self._find_by_fts(stem, collection, system, conn, size=size)
+                if rows:
+                    for r in rows:
+                        if stems_match(stem, r["stem"]):
+                            key = (r["torrent"], r["select_idx"])
+                            if key not in seen:
+                                seen.add(key)
+                                matched.append(r)
+                            mr.matched_rows.append(r)
+                            mr.matched_via = "fts5"
+                            break
+
+                if mr.matched_rows:
+                    matched_stems.add(stem)
+                    results.append(mr)
+                    continue
+
+                # Tier 3: trigram FTS5 (substring matching)
+                rows = self._find_by_trigram(stem, collection, system, conn, size=size)
+                if rows:
+                    for r in rows:
+                        if stems_match(stem, r["stem"]):
+                            key = (r["torrent"], r["select_idx"])
+                            if key not in seen:
+                                seen.add(key)
+                                matched.append(r)
+                            mr.matched_rows.append(r)
+                            mr.matched_via = "trigram"
+                            break
+
+                if mr.matched_rows:
+                    matched_stems.add(stem)
+                    results.append(mr)
+                    continue
+
+                # Tier 4: keyword fallback
+                rows = self._find_by_keywords(stem, collection, system, conn, size=size)
+                if rows:
+                    for r in rows:
+                        if stems_match(stem, r["stem"]):
+                            key = (r["torrent"], r["select_idx"])
+                            if key not in seen:
+                                seen.add(key)
+                                matched.append(r)
+                            mr.matched_rows.append(r)
+                            mr.matched_via = "keyword"
+                            break
+
+                if mr.matched_rows:
+                    matched_stems.add(stem)
+                else:
+                    unmatched.append(entry)
+                results.append(mr)
+
+        report = MatchReport(
+            matched=matched,
+            matched_stems=matched_stems,
+            unmatched=unmatched,
+            results=results,
+            total_time_ms=(time.time() - t0) * 1000,
+        )
+
+        if use_cache:
+            self._cache.put(cache_key, report)
+
+        log.debug(
+            "match_dat: %d entries → %d matched, %d unmatched in %.0fms",
+            len(entries), len(matched_stems), len(unmatched), report.total_time_ms)
+        return report
+
+    def cache_stats(self) -> dict:
+        """Return cache statistics."""
+        return self._cache.stats()
+
+    def clear_cache(self) -> None:
+        """Clear the query cache."""
+        self._cache.clear()
+
+    def get_download_spec(
+        self,
+        file_id: int,
+        torrent_dir: Path = DEFAULT_TORRENT_DIR,
+    ) -> "DownloadFileSpec | None":
+        """Resolve a file ID into all metadata needed by the downloader."""
+        if not self._ready:
+            log.warning("get_download_spec: index DB not ready at %s", self._path)
+            return None
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        with self.conn() as c:
+            row = c.execute(
+                "SELECT * FROM files WHERE id = ?",
+                (file_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return DownloadFileSpec(
+            file_id=row["id"],
+            torrent_name=row["torrent"],
+            torrent_path=torrent_dir / row["torrent"],
+            select_index=row["select_idx"],
+            basename=row["basename"],
+            path_in_torrent=row["path_full"],
+            size=row["size"],
+            collection=row["collection"],
+            system=row["system"],
+        )
+
+    def get_download_specs_batch(
+        self,
+        file_ids: list[int],
+        torrent_dir: Path = DEFAULT_TORRENT_DIR,
+    ) -> dict[int, "DownloadFileSpec"]:
+        """Resolve multiple file IDs in a single DB query.
+
+        Returns a dict mapping file_id → DownloadFileSpec. Missing IDs are
+        omitted. Avoids N separate connection/query overheads.
+        """
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        if not file_ids:
+            return {}
+        with self.conn() as c:
+            ids = sorted(set(file_ids))
+            placeholders = ",".join("?" * len(ids))
+            rows = c.execute(
+                f"SELECT * FROM files WHERE id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {
+            row["id"]: DownloadFileSpec(
+                file_id=row["id"],
+                torrent_name=row["torrent"],
+                torrent_path=torrent_dir / row["torrent"],
+                select_index=row["select_idx"],
+                basename=row["basename"],
+                path_in_torrent=row["path_full"],
+                size=row["size"],
+                collection=row["collection"],
+                system=row["system"],
+            )
+            for row in rows
+        }
+
+    # ── Typed query API ───────────────────────────────────────────────────
+
+    _SORT_COLUMNS = {
+        "stem": "stem",
+        "size": "size",
+        "collection": "collection",
+        "system": "system",
+    }
+
+    def _row_to_library_item(
+        self,
+        row: sqlite3.Row,
+        tags: tuple[str, ...] = (),
+        regions: tuple[str, ...] = (),
+    ) -> "LibraryItem":
+        """Convert a sqlite3.Row to a LibraryItem with optional tags/regions."""
+        return LibraryItem(
+            id=row["id"],
+            stem=row["stem"],
+            basename=row["basename"],
+            collection=row["collection"],
+            system=row["system"],
+            size=row["size"],
+            source_torrent=row["torrent"],
+            source_index=row["select_idx"],
+            path_in_torrent=row["path_full"],
+            tags=tags,
+            regions=regions,
+        )
+
+    def _load_tags_for_files(
+        self, c: sqlite3.Connection, file_ids: Collection[int],
+    ) -> dict[int, tuple[str, ...]]:
+        """Batch-load file_tags for the given file IDs."""
+        if not file_ids:
+            return {}
+        ids = sorted(set(file_ids))
+        placeholders = ",".join("?" * len(ids))
+        result: dict[int, list[str]] = {fid: [] for fid in ids}
+        for row in c.execute(
+            f"SELECT file_id, tag FROM file_tags "
+            f"WHERE file_id IN ({placeholders}) ORDER BY tag",
+            ids,
+        ):
+            result.setdefault(row["file_id"], []).append(row["tag"])
+        return {fid: tuple(tags) for fid, tags in result.items()}
+
+    def _load_regions_for_files(
+        self, c: sqlite3.Connection, file_ids: Collection[int],
+    ) -> dict[int, tuple[str, ...]]:
+        """Batch-load file_regions for the given file IDs."""
+        if not file_ids:
+            return {}
+        ids = sorted(set(file_ids))
+        placeholders = ",".join("?" * len(ids))
+        result: dict[int, list[str]] = {fid: [] for fid in ids}
+        for row in c.execute(
+            f"SELECT file_id, region FROM file_regions "
+            f"WHERE file_id IN ({placeholders}) ORDER BY region",
+            ids,
+        ):
+            result.setdefault(row["file_id"], []).append(row["region"])
+        return {fid: tuple(regions) for fid, regions in result.items()}
+
+    @staticmethod
+    def _category_condition(category: str) -> tuple[str, list[Any]]:
+        """Return a SQL predicate for a normalised library category."""
+        category = category.strip().lower()
+        if category == "homebrew":
+            return (
+                "id IN (SELECT file_id FROM file_tags WHERE tag = 'homebrew')",
+                [],
+            )
+        if category == "demo":
+            return (
+                "id IN (SELECT file_id FROM file_tags WHERE tag = 'demo')",
+                [],
+            )
+        if category == "tool":
+            return (
+                "id IN (SELECT file_id FROM file_tags "
+                "WHERE tag IN ('debug', 'trainer', 'inventory'))",
+                [],
+            )
+        if category == "game":
+            return (
+                "id NOT IN (SELECT file_id FROM file_tags "
+                "WHERE tag IN ('homebrew', 'demo', 'debug', 'trainer', 'inventory'))",
+                [],
+            )
+        return "1=0", []
+
+    def _build_library_where(
+        self,
+        query: "LibraryQuery",
+        *,
+        include_tags: bool = True,
+        include_regions: bool = True,
+        include_categories: bool = True,
+    ) -> tuple[str, list[Any]]:
+        """Build a parameterised WHERE clause shared by search and facets."""
+        where: list[str] = []
+        params: list[Any] = []
+
+        text = query.text.strip().lower()
+        if text:
+            if len(text) >= 3:
+                where.append(
+                    "id IN (SELECT rowid FROM files_trigram "
+                    "WHERE files_trigram MATCH ?)"
+                )
+                params.append(fts_escape(text))
+            else:
+                where.append("stem LIKE ?")
+                params.append(f"%{text}%")
+
+        if query.collection:
+            where.append("collection = ?")
+            params.append(query.collection)
+        if query.system:
+            where.append("system = ?")
+            params.append(query.system)
+
+        if query.file_ids:
+            placeholders = ",".join("?" * len(query.file_ids))
+            where.append(f"id IN ({placeholders})")
+            params.extend(query.file_ids)
+        elif query.selected_only:
+            where.append("1=0")
+
+        if include_tags:
+            for tag in sorted(query.tags):
+                where.append(
+                    "id IN (SELECT file_id FROM file_tags WHERE tag = ?)"
+                )
+                params.append(tag)
+
+        if include_regions:
+            for region in sorted(query.regions):
+                where.append(
+                    "id IN (SELECT file_id FROM file_regions WHERE region = ?)"
+                )
+                params.append(region)
+
+        if include_categories and query.categories:
+            category_parts: list[str] = []
+            for category in sorted(query.categories):
+                predicate, category_params = self._category_condition(category)
+                category_parts.append(f"({predicate})")
+                params.extend(category_params)
+            where.append("(" + " OR ".join(category_parts) + ")")
+
+        return (" AND ".join(where) if where else "1=1"), params
+
+    def search_library(
+        self,
+        query: "LibraryQuery",
+    ) -> tuple[list["LibraryItem"], int]:
+        """Search the library with validated sorting and SQL pagination."""
+        if not _HAS_DOMAIN:
+            raise RuntimeError(
+                "Domain types not available — cannot return LibraryItem instances"
+            )
+
+        where_clause, params = self._build_library_where(query)
+        sort_col = self._SORT_COLUMNS.get(query.sort_field, "stem")
+        order = "DESC" if query.descending else "ASC"
+
+        with self.conn() as c:
+            total = c.execute(
+                f"SELECT COUNT(*) FROM files WHERE {where_clause}", params
+            ).fetchone()[0]
+
+            if query.limit <= 0:
+                return [], total
+
+            rows = c.execute(
+                f"SELECT * FROM files WHERE {where_clause} "
+                f"ORDER BY {sort_col} {order}, id ASC "
+                f"LIMIT ? OFFSET ?",
+                [*params, query.limit, query.offset],
+            ).fetchall()
+            if not rows:
+                return [], total
+
+            ids = [r["id"] for r in rows]
+            tag_map = self._load_tags_for_files(c, ids)
+            region_map = self._load_regions_for_files(c, ids)
+            return [
+                self._row_to_library_item(
+                    row,
+                    tags=tag_map.get(row["id"], ()),
+                    regions=region_map.get(row["id"], ()),
+                )
+                for row in rows
+            ], total
+
+    def get_library_facets(self, query: "LibraryQuery") -> "LibraryFacets":
+        """Return region, category and tag counts for the current search.
+
+        Each facet dimension is calculated without its own selected values so
+        the UI can keep showing alternative choices while another value in the
+        same dimension is selected.
+        """
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+
+        with self.conn() as c:
+            total_where, total_params = self._build_library_where(query)
+            total = c.execute(
+                f"SELECT COUNT(*) FROM files WHERE {total_where}", total_params
+            ).fetchone()[0]
+
+            region_where, region_params = self._build_library_where(
+                query, include_regions=False,
+            )
+            region_rows = c.execute(
+                "SELECT fr.region AS value, COUNT(DISTINCT fr.file_id) AS count "
+                "FROM file_regions fr JOIN files f ON f.id = fr.file_id "
+                f"WHERE {_ID_WORD.sub('f.id', region_where)} "
+                "GROUP BY fr.region ORDER BY count DESC, value ASC",
+                region_params,
+            ).fetchall()
+
+            tag_where, tag_params = self._build_library_where(
+                query, include_tags=False,
+            )
+            tag_rows = c.execute(
+                "SELECT ft.tag AS value, COUNT(DISTINCT ft.file_id) AS count "
+                "FROM file_tags ft JOIN files f ON f.id = ft.file_id "
+                f"WHERE {_ID_WORD.sub('f.id', tag_where)} "
+                "GROUP BY ft.tag ORDER BY count DESC, value ASC",
+                tag_params,
+            ).fetchall()
+
+            category_query = type(query)(
+                text=query.text,
+                collection=query.collection,
+                system=query.system,
+                tags=query.tags,
+                regions=query.regions,
+                categories=frozenset(),
+                selected_only=query.selected_only,
+                file_ids=query.file_ids,
+                offset=0,
+                limit=0,
+                sort_field=query.sort_field,
+                descending=query.descending,
+            )
+            category_where, category_params = self._build_library_where(
+                category_query, include_categories=False,
+            )
+            category_counts: list[FacetCount] = []
+            for category in ("game", "homebrew", "demo", "tool"):
+                predicate, predicate_params = self._category_condition(category)
+                count = c.execute(
+                    "SELECT COUNT(*) FROM files "
+                    f"WHERE ({category_where}) AND ({predicate})",
+                    [*category_params, *predicate_params],
+                ).fetchone()[0]
+                category_counts.append(FacetCount(category, count))
+
+        return LibraryFacets(
+            total=total,
+            regions=tuple(
+                FacetCount(row["value"], row["count"]) for row in region_rows
+            ),
+            categories=tuple(category_counts),
+            tags=tuple(
+                FacetCount(row["value"], row["count"]) for row in tag_rows
+            ),
+        )
+
+    def get_files_by_ids(self, file_ids: Collection[int]) -> list["LibraryItem"]:
+        """Fetch multiple files by their primary key IDs."""
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        if not self._ready:
+            return []
+        if not file_ids:
+            return []
+
+        with self.conn() as c:
+            ids = sorted(set(file_ids))
+            placeholders = ",".join("?" * len(ids))
+            rows = c.execute(
+                f"SELECT * FROM files WHERE id IN ({placeholders}) ORDER BY id",
+                ids,
+            ).fetchall()
+
+            tag_map = self._load_tags_for_files(c, ids)
+            region_map = self._load_regions_for_files(c, ids)
+
+            return [
+                self._row_to_library_item(
+                    r,
+                    tags=tag_map.get(r["id"], ()),
+                    regions=region_map.get(r["id"], ()),
+                )
+                for r in rows
+            ]
+
+    # ── Overview and diagnostics ──────────────────────────────────────────
+
+    def get_index_overview(self) -> "IndexOverview":
+        """Return aggregate index statistics."""
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        if not self._ready:
+            return IndexOverview(collections=0, systems=0, files=0, database_size=0, last_build=None)
+
+        with self.conn() as c:
+            collections = c.execute(
+                "SELECT COUNT(DISTINCT collection) FROM files"
+            ).fetchone()[0]
+            systems = c.execute(
+                "SELECT COUNT(DISTINCT system) FROM files"
+            ).fetchone()[0]
+            files = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+
+            # Database file size
+            db_path = Path(self._path)
+            db_size = db_path.stat().st_size if db_path.exists() else 0
+
+            # Last build from schema_meta
+            last_build: datetime.datetime | None = None
+            row = c.execute(
+                "SELECT value FROM schema_meta WHERE key = 'created'"
+            ).fetchone()
+            if row and row["value"]:
+                try:
+                    last_build = datetime.datetime.fromisoformat(row["value"])
+                except (ValueError, TypeError):
+                    pass
+
+            # Prefer latest completed index_runs if available
+            run_row = c.execute(
+                "SELECT completed_at FROM index_runs "
+                "WHERE status = 'completed' "
+                "ORDER BY completed_at DESC LIMIT 1"
+            ).fetchone()
+            if run_row and run_row["completed_at"]:
+                try:
+                    last_build = datetime.datetime.fromisoformat(run_row["completed_at"])
+                except (ValueError, TypeError):
+                    pass
+
+            return IndexOverview(
+                collections=collections,
+                systems=systems,
+                files=files,
+                database_size=db_size,
+                last_build=last_build,
+            )
+
+    def get_collection_summaries(self) -> list["CollectionSummary"]:
+        """Return per-collection summary rows."""
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        if not self._ready:
+            return []
+
+        with self.conn() as c:
+            rows = c.execute("""
+                SELECT collection, COUNT(DISTINCT system) AS systems,
+                       COUNT(*) AS files
+                FROM files
+                GROUP BY collection
+                ORDER BY collection
+            """).fetchall()
+
+            results: list[CollectionSummary] = []
+            for r in rows:
+                coll = r["collection"]
+                trow = c.execute(
+                    "SELECT COUNT(*) AS cnt FROM torrents WHERE collection = ?",
+                    (coll,),
+                ).fetchone()
+                has_torrents = bool(trow and trow["cnt"] > 0)
+                status = CollectionStatus.INDEXED if has_torrents else CollectionStatus.MISSING
+
+                results.append(CollectionSummary(
+                    name=coll,
+                    systems=r["systems"],
+                    files=r["files"],
+                    status=status,
+                ))
+            return results
+
+    def get_system_summaries(self, collection: str) -> list["SystemSummary"]:
+        """Return per-system summary for a collection."""
+        if not _HAS_DOMAIN:
+            raise RuntimeError("Domain types not available")
+        if not self._ready:
+            return []
+
+        with self.conn() as c:
+            rows = c.execute("""
+                SELECT system, COUNT(*) AS files
+                FROM files
+                WHERE collection = ?
+                GROUP BY system
+                ORDER BY system
+            """, (collection,)).fetchall()
+
+            results: list[SystemSummary] = []
+            for r in rows:
+                sys_name = r["system"]
+                trow = c.execute(
+                    "SELECT COUNT(*) AS cnt FROM torrents "
+                    "WHERE collection = ? AND system = ?",
+                    (collection, sys_name),
+                ).fetchone()
+                source_present = bool(trow and trow["cnt"] > 0)
+
+                results.append(SystemSummary(
+                    collection=collection,
+                    system=sys_name,
+                    files=r["files"],
+                    last_update=None,
+                    source_present=source_present,
+                    expected_files=r["files"] if source_present else None,
+                ))
+            return results
+
+    def get_index_runs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return recent index build records, newest first."""
+        if not self._ready:
+            return []
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT id, started_at, completed_at, status, torrent_count, "
+                "file_count, error_count, elapsed_ms "
+                "FROM index_runs ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_collection(self, collection: str) -> int:
+        """Remove all indexed rows and torrent metadata for a collection."""
+        with self.conn() as c:
+            count = c.execute(
+                "SELECT COUNT(*) FROM files WHERE collection = ?",
+                (collection,),
+            ).fetchone()[0]
+            c.execute("DELETE FROM files WHERE collection = ?", (collection,))
+            c.execute("DELETE FROM torrents WHERE collection = ?", (collection,))
+        self.clear_cache()
+        return count
+
+    def run_integrity_check(self) -> dict:
+        """Run PRAGMA quick_check and return results."""
+        with self.conn() as c:
+            row = c.execute("PRAGMA quick_check").fetchone()
+            result = row[0] if row else "unknown"
+
+            table_counts: dict[str, int] = {}
+            for table in ("files", "torrents", "file_tags", "file_regions", "index_runs"):
+                try:
+                    cnt = c.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    table_counts[table] = cnt
+                except sqlite3.OperationalError:
+                    table_counts[table] = -1
+
+            return {
+                "quick_check": result,
+                "table_counts": table_counts,
+                "ok": result == "ok",
+            }
+
+    def find_missing_torrent_sources(
+        self, torrent_dir: Path | str = DEFAULT_TORRENT_DIR,
+    ) -> list[dict]:
+        """Find indexed torrent sources that are missing from disk.
+
+        ``torrent_dir`` defaults to the project source directory but callers
+        can supply the configured location used by the desktop application.
+        """
+        torrent_dir = Path(torrent_dir)
+        with self.conn() as c:
+            rows = c.execute(
+                "SELECT DISTINCT torrent FROM files ORDER BY torrent"
+            ).fetchall()
+
+            missing: list[dict] = []
+            for r in rows:
+                torrent_name = r["torrent"]
+                torrent_path = torrent_dir / torrent_name
+                if not torrent_path.exists():
+                    missing.append({
+                        "torrent": torrent_name,
+                        "path": str(torrent_path),
+                    })
+            return missing
+
+    # ── Detailed DAT matching ─────────────────────────────────────────────
+
+    def match_dat_detailed(
+        self,
+        entries: Sequence[DatEntry],
+        collection: str = "",
+        system: str = "",
+        candidate_limit: int = 5,
+    ) -> dict:
+        """Match DAT entries returning multiple candidates with confidence scores.
+
+        Returns a dict with:
+
+        ``results``: list of per-entry results, each containing:
+            - entry: DatEntry — the original entry
+            - candidates: list of candidate dicts
+            - automatic_file_id: int | None — best candidate's file_id
+            - automatic_method: str | None — match method
+            - automatic_confidence: float | None — confidence [0,1]
+
+        Each candidate dict has:
+            file_id, title, collection, system, size, method,
+            confidence (float), reasons (list[str])
+
+        ``summary``: dict with total, exact, fuzzy, unmatched counts.
+
+        Scoring formula (deterministic, clamped to [0, 1]):
+            - Exact stem: 1.00
+            - Exact normalized core title: 0.96
+            - Strong keyword overlap (>=80%): 0.95
+            - Moderate keyword overlap (>=50%): 0.85
+            - Weak keyword overlap: 0.70
+            - No keywords possible: 0.50
+            - Matching non-zero size: +0.03
+            - Collection and system both match: +0.02
+            - Conflicting non-zero size (>10% diff): -0.08
+            - Cross-system/cross-collection fallback: -0.15
+        """
+        if not getattr(self, '_ready', False):
+            return {"results": [], "summary": {"total": 0, "exact": 0, "fuzzy": 0, "unmatched": 0}}
+        t0 = time.time()
+        results_list: list[dict] = []
+        summary_exact = 0
+        summary_fuzzy = 0
+        summary_unmatched = 0
+
+        with self.conn() as conn:
+            for entry in entries:
+                entry_stem = stem_from_romname(entry.filename)
+                entry_size = entry.size
+
+                # Collect candidates from all tiers (deduplicated by id,
+                # preserving insertion order via dict for deterministic ranking).
+                seen_ids: dict[int, str] = {}  # id → tier_source
+                tier_sources: dict[int, str] = {}
+
+                # Tier 1: exact stem
+                tier1 = self._find_by_stem(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier1:
+                    if r["id"] not in seen_ids:
+                        seen_ids[r["id"]] = "exact"
+                        tier_sources[r["id"]] = "exact"
+
+                # Tier 2: FTS5
+                tier2 = self._find_by_fts(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier2:
+                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                        seen_ids[r["id"]] = "fts5"
+                        tier_sources[r["id"]] = "fts5"
+
+                # Tier 3: trigram
+                tier3 = self._find_by_trigram(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier3:
+                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                        seen_ids[r["id"]] = "trigram"
+                        tier_sources[r["id"]] = "trigram"
+
+                # Tier 4: keywords
+                tier4 = self._find_by_keywords(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier4:
+                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                        seen_ids[r["id"]] = "keyword"
+                        tier_sources[r["id"]] = "keyword"
+
+                # Rank ALL candidates before truncation (P1-3 fix).
+                tier_priority = {"exact": 0, "fts5": 1, "trigram": 2, "keyword": 3}
+                ranked_ids = sorted(
+                    seen_ids.keys(),
+                    key=lambda cid: tier_priority.get(tier_sources.get(cid, "keyword"), 99),
+                )
+
+                # Score ALL candidates before truncation (P1-3 fix).
+                scored: list[dict] = []
+                for cand_id in ranked_ids:
+                    # Fetch the full row to score it
+                    cand_row = conn.execute(
+                        "SELECT * FROM files WHERE id = ?", (cand_id,)
+                    ).fetchone()
+                    if cand_row is None:
+                        continue
+                    method = tier_sources.get(cand_id, "fuzzy")
+                    confidence, reasons = self._score_candidate(entry_stem, entry_size, cand_row, collection, system)
+                    scored.append({
+                        "file_id": cand_row["id"],
+                        "title": cand_row["stem"],
+                        "collection": cand_row["collection"],
+                        "system": cand_row["system"],
+                        "size": cand_row["size"],
+                        "method": method,
+                        "confidence": round(confidence, 4),
+                        "reasons": reasons,
+                    })
+
+                # Sort by confidence descending, then tier priority, then
+                # exact size match, then file_id for deterministic ordering.
+                scored.sort(key=lambda x: (
+                    -x["confidence"],
+                    tier_priority.get(x.get("method", "keyword"), 99),
+                    0 if x["size"] == entry_size else 1,
+                    x["file_id"],
+                ))
+
+                # Truncate AFTER scoring and sorting
+                scored = scored[:candidate_limit]
+
+                # Best candidate for automatic suggestion
+                if scored:
+                    auto = scored[0]
+                    automatic_file_id: int | None = auto["file_id"]
+                    automatic_method: str | None = auto["method"]
+                    automatic_confidence: float | None = auto["confidence"]
+                    if auto["method"] == "exact":
+                        summary_exact += 1
+                    else:
+                        summary_fuzzy += 1
+                else:
+                    automatic_file_id = None
+                    automatic_method = None
+                    automatic_confidence = None
+                    summary_unmatched += 1
+
+                results_list.append({
+                    "entry": entry,
+                    "candidates": scored,
+                    "automatic_file_id": automatic_file_id,
+                    "automatic_method": automatic_method,
+                    "automatic_confidence": automatic_confidence,
+                })
+
+        elapsed = (time.time() - t0) * 1000
+        log.debug(
+            "match_dat_detailed: %d entries → %d exact, %d fuzzy, %d unmatched in %.0fms",
+            len(entries), summary_exact, summary_fuzzy, summary_unmatched, elapsed,
+        )
+
+        return {
+            "results": results_list,
+            "summary": {
+                "total": len(entries),
+                "exact": summary_exact,
+                "fuzzy": summary_fuzzy,
+                "unmatched": summary_unmatched,
+            },
+        }
+
+        # ── Two-best-candidates helper (for margin-based classification) ─────
+
+    def get_two_best_candidates(
+        self,
+        entry: DatEntry,
+        collection: str = "",
+        system: str = "",
+        conn: sqlite3.Connection | None = None,
+    ) -> tuple[dict | None, dict | None]:
+        """Return the top two scored candidates for a single entry.
+
+        Returns (best, second_best) where each is a dict with keys:
+            file_id, title, collection, system, size, method, confidence, reasons
+
+        Either or both may be ``None`` (no candidate at all, or only one
+        candidate found).  Candidates are never de-duplicated by the
+        caller — the margin computation needs both even if they are equal.
+
+        If *conn* is provided, reuse it instead of opening a new connection.
+        This is critical for batch matching — opening a fresh connection
+        per entry destroys the SQLite page cache and is ~20x slower.
+        """
+        if not self._ready:
+            return None, None
+        entry_stem = stem_from_romname(entry.filename)
+        entry_size = entry.size
+
+        if conn is not None:
+            return self._get_two_best_with_conn(entry, entry_stem, entry_size, collection, system, conn)
+        with self.conn() as c:
+            return self._get_two_best_with_conn(entry, entry_stem, entry_size, collection, system, c)
+
+    def _get_two_best_with_conn(
+        self,
+        entry: DatEntry,
+        entry_stem: str,
+        entry_size: int,
+        collection: str,
+        system: str,
+        conn: sqlite3.Connection,
+    ) -> tuple[dict | None, dict | None]:
+        seen_ids: dict[int, str] = {}  # id → tier_source (ordered)
+        tier_sources: dict[int, str] = {}
+
+        # Tier 1: exact stem
+        tier1 = self._find_by_stem(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier1:
+            if r["id"] not in seen_ids:
+                seen_ids[r["id"]] = "exact"
+                tier_sources[r["id"]] = "exact"
+
+        # Tier 2: FTS5 — collect all, don't truncate at 2
+        tier2 = self._find_by_fts(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier2:
+            if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                seen_ids[r["id"]] = "fts5"
+                if r["id"] not in tier_sources:
+                    tier_sources[r["id"]] = "fts5"
+
+        # Tier 3: trigram
+        tier3 = self._find_by_trigram(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier3:
+            if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                seen_ids[r["id"]] = "trigram"
+                if r["id"] not in tier_sources:
+                    tier_sources[r["id"]] = "trigram"
+
+        # Tier 4: keywords
+        tier4 = self._find_by_keywords(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier4:
+            if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                seen_ids[r["id"]] = "keyword"
+                if r["id"] not in tier_sources:
+                    tier_sources[r["id"]] = "keyword"
+
+        # Score all candidates
+        scored: list[dict] = []
+        for cand_id in seen_ids:
+            cand_row = conn.execute(
+                "SELECT * FROM files WHERE id = ?", (cand_id,)
+            ).fetchone()
+            if cand_row is None:
+                continue
+            method = tier_sources.get(cand_id, "fuzzy")
+            confidence, reasons = self._score_candidate(
+                entry_stem, entry_size, cand_row, collection, system,
+            )
+            scored.append({
+                "file_id": cand_row["id"],
+                "title": cand_row["stem"],
+                "collection": cand_row["collection"],
+                "system": cand_row["system"],
+                "size": cand_row["size"],
+                "method": "exact" if method == "exact" else "fuzzy",
+                "confidence": round(confidence, 4),
+                "reasons": reasons,
+            })
+
+        # Deterministic sort: confidence, tier, size match, file_id
+        tier_priority = {"exact": 0, "fts5": 1, "trigram": 2, "keyword": 3, "fuzzy": 1}
+        scored.sort(key=lambda x: (
+            -x["confidence"],
+            tier_priority.get(x.get("method", "fuzzy"), 99),
+            0 if x["size"] == entry_size else 1,
+            x["file_id"],
+        ))
+        if not scored:
+            return None, None
+        best = scored[0]
+        second = scored[1] if len(scored) > 1 else None
+        return best, second
+
+    @staticmethod
+    def _score_candidate(
+        entry_stem: str, entry_size: int,
+        candidate: sqlite3.Row,
+        collection: str = "", system: str = "",
+    ) -> tuple[float, list[str]]:
+        """Score a single candidate. Delegates to the shared scoring module.
+
+        See :func:`minerva.matching.scoring.score_candidate` for the formula.
+        """
+        from minerva.matching.scoring import score_candidate
+        return score_candidate(
+            entry_stem, entry_size,
+            candidate["stem"], candidate["size"],
+            candidate["collection"], candidate["system"],
+            collection, system,
+        )
+
+    def find_file_id_by_stem_and_size(
+        self,
+        stem: str,
+        size: int = 0,
+        collection: str = "",
+        system: str = "",
+    ) -> StemSizeMatch | list[StemSizeMatch] | None:
+        where_parts = ["stem = ?"]
+        params: list = [stem]
+        if size:
+            where_parts.append("size = ?")
+            params.append(size)
+        if collection:
+            where_parts.append("collection = ?")
+            params.append(collection)
+        if system:
+            where_parts.append("system = ?")
+            params.append(system)
+        where = " AND ".join(where_parts)
+        with self.conn() as c:
+            rows = c.execute(
+                f"SELECT id, collection, system, basename, size, path_full FROM files WHERE {where}",
+                params,
+            ).fetchall()
+        if not rows:
+            return None
+        matches = [
+            StemSizeMatch(
+                file_id=r["id"], collection=r["collection"], system=r["system"],
+                basename=r["basename"], size=r["size"], path_full=r["path_full"],
+            ) for r in rows
+        ]
+        return matches[0] if len(matches) == 1 else matches
+
+    def get_file_regions(self, file_ids: list[int]) -> dict[int, list[str]]:
+        with self.conn() as c:
+            raw = self._load_regions_for_files(c, file_ids)
+        return {fid: list(regions) for fid, regions in raw.items()}
+
+    def get_file_tags(self, file_ids: list[int]) -> dict[int, list[str]]:
+        with self.conn() as c:
+            raw = self._load_tags_for_files(c, file_ids)
+        return {fid: list(tags) for fid, tags in raw.items()}
+
+    # ── Private matching methods ──────────────────────────────────────────
+    def _find_by_stem(
+        self, stem: str, collection: str, system: str,
+        conn: sqlite3.Connection | None = None,
+        size: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Tier 1: Exact stem match using the unique index."""
+        cache_key = ("stem", stem, collection, system, size)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        def _build_where(include_size: bool) -> tuple[str, list]:
+            where = ["stem = ?"]
+            params: list = [stem]
+            if include_size and size > 0:
+                where.append("size = ?")
+                params.append(size)
+            if collection:
+                where.append("collection = ?")
+                params.append(collection)
+            if system:
+                where.append("system = ?")
+                params.append(system)
+            return " AND ".join(where), params
+
+        def _do(c: sqlite3.Connection) -> list[sqlite3.Row]:
+            w, params = _build_where(include_size=True)
+            rows = c.execute(
+                f"SELECT * FROM files WHERE {w} ORDER BY size DESC", params
+            ).fetchall()
+            if not rows and size > 0:
+                # Soft-filter fallback: maybe the size differs across regions
+                # / repacks. Try without the size constraint.
+                w, params = _build_where(include_size=False)
+                rows = c.execute(
+                    f"SELECT * FROM files WHERE {w} ORDER BY size DESC", params
+                ).fetchall()
+            return rows
+
+        if conn is not None:
+            rows = _do(conn)
+        else:
+            with self.conn() as c:
+                rows = _do(c)
+        self._cache.put(cache_key, rows)
+        return rows
+
+    def _find_by_fts(
+        self, stem: str, collection: str, system: str,
+        conn: sqlite3.Connection | None = None,
+        size: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Tier 2: FTS5 MATCH query on stem words.
+
+        Uses porter + unicode61 tokenizer for natural language matching.
+        """
+        keywords = title_keywords(stem)
+        if not keywords:
+            return []
+        fts_terms = " OR ".join(fts_escape(k) for k in keywords)
+        return self._fts_query(fts_terms, "files_fts", collection, system, conn, size=size)
+
+    def _find_by_trigram(
+        self, stem: str, collection: str, system: str,
+        conn: sqlite3.Connection | None = None,
+        size: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Tier 3: FTS5 trigram matching for partial substring matching."""
+        keywords = title_keywords(stem)
+        if not keywords:
+            return []
+        longest = max(keywords, key=len)
+        fts_terms = fts_escape(longest)
+        return self._fts_query(fts_terms, "files_trigram", collection, system, conn, size=size)
+
+    def _find_by_keywords(
+        self, stem: str, collection: str, system: str,
+        conn: sqlite3.Connection | None = None,
+        size: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Tier 4: LIKE-based keyword fallback (worst case)."""
+        keywords = title_keywords(stem)
+        if len(keywords) < 2:
+            return []
+        top_kw = sorted(keywords, key=lambda w: -len(w))[:2]
+        where = ["stem LIKE ?" for _ in top_kw]
+        params: list = [f"%{kw}%" for kw in top_kw]
+        if size > 0:
+            where.append("size = ?")
+            params.append(size)
+        if collection:
+            where.append("collection = ?")
+            params.append(collection)
+        if system:
+            where.append("system = ?")
+            params.append(system)
+
+        def _do(c: sqlite3.Connection) -> list[sqlite3.Row]:
+            return c.execute(
+                f"SELECT * FROM files WHERE {' AND '.join(where)} "
+                f"LIMIT {MAX_FUZZY_CANDIDATES}", params
+            ).fetchall()
+
+        if conn is not None:
+            return _do(conn)
+        with self.conn() as c:
+            return _do(c)
+
+    def _fts_query(
+        self,
+        fts_terms: str,
+        fts_table: str,
+        collection: str,
+        system: str,
+        conn: sqlite3.Connection | None = None,
+        size: int = 0,
+    ) -> list[sqlite3.Row]:
+        """Execute a FTS5 MATCH query with optional collection/system scope.
+
+        Uses a two-step approach: FTS5 first to get rowids, then a single
+        batch query to fetch all rows by id. This avoids expensive JOINs.
+
+        ``size`` is a soft pre-filter: when > 0 we restrict the candidate
+        set to rows with that exact size (DAT sizes are usually accurate
+        and unique enough to drop most cross-system noise). If no rows
+        match, we retry without the size constraint.
+        """
+        if fts_table not in ("files_fts", "files_trigram"):
+            raise ValueError(f"Invalid FTS table: {fts_table}")
+
+        def _do(c: sqlite3.Connection) -> list[sqlite3.Row]:
+            # Step 1: FTS5 returns rowids fast
+            rowids = c.execute(
+                f"SELECT rowid FROM {fts_table} "
+                f"WHERE {fts_table} MATCH ? "
+                f"ORDER BY rank LIMIT ?",
+                (fts_terms, MAX_FUZZY_CANDIDATES)).fetchall()
+            if not rowids:
+                return []
+            ids = [r[0] for r in rowids]
+
+            # Step 2: batch query for all matching rows
+            placeholders = ",".join("?" * len(ids))
+            where = [f"id IN ({placeholders})"]
+            params: list = list(ids)
+            if size > 0:
+                where.append("size = ?")
+                params.append(size)
+            if collection:
+                where.append("collection = ?")
+                params.append(collection)
+            if system:
+                where.append("system = ?")
+                params.append(system)
+            rows = c.execute(
+                f"SELECT * FROM files WHERE {' AND '.join(where)} "
+                f"ORDER BY size DESC",
+                params).fetchall()
+            if not rows and size > 0:
+                # Soft-filter fallback: drop the size constraint.
+                where = [f"id IN ({placeholders})"]
+                params = list(ids)
+                if collection:
+                    where.append("collection = ?")
+                    params.append(collection)
+                if system:
+                    where.append("system = ?")
+                    params.append(system)
+                rows = c.execute(
+                    f"SELECT * FROM files WHERE {' AND '.join(where)} "
+                    f"ORDER BY size DESC",
+                    params).fetchall()
+            return rows
+
+        if conn is not None:
+            return _do(conn)
+        with self.conn() as c:
+            return _do(c)

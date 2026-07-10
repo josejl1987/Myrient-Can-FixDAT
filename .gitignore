@@ -44,3 +44,51 @@ fixdat_temp.dat
 
 # directories
 dat/
+
+# Minerva Can FixDAT
+torrents/minerva_index.db
+torrents/minerva_index.json
+poc_downloads/
+test_dl_output/
+.tmp_dl/     # legacy aria2c temp
+.tmp_qbit/   # legacy qbit temp
+# Data / runtime
+data/
+torrents/
+.atl/
+*.torrent
+*.patch
+*.uiux.patch
+
+# Test / coverage artifacts
+.coverage
+.pytest_cache/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Agent / tool caches
+.agent/
+.reasonix/
+.opencode/
+.research-cache/
+
+# Binary runtime artifacts
+.bin/
+
+# Generated dumps
+repomix-output.xml
+*.diff
+
+# Root-level DAT corpora (keep fixtures under tests/fixtures/)
+/*.dat
+
+# Backup zips
+.git.zip
+*.zip
+!tests/fixtures/*.json
+
+# Unrelated media
+*.wav
+Truthear_*
