@@ -247,6 +247,8 @@ class DownloadsPage(BasePage):
             action_text="Open Library",
         )
         self._empty_state.action_clicked.connect(self._open_library)
+        self._content_state = ContentState()
+        self._content_state.set_empty(self._empty_state)
         self._results_widget = self._build_content_widget()
         self._content_state.set_content(self._results_widget)
         root.addWidget(self._content_state, 1)
