@@ -1,6 +1,4 @@
-"""
-Sidebar navigation widget for the Minerva app shell.
-"""
+"""Sidebar navigation widget for the Minerva app shell."""
 
 from __future__ import annotations
 
@@ -13,11 +11,7 @@ from minerva.ui.theme import ThemeTokens
 
 
 class SidebarRow(QtWidgets.QPushButton):
-    """A single row in the sidebar — icon + label, wired to a QAction.
-
-    The row's active state is toggled by the ``active`` dynamic property,
-    which is styled via QSS selectors in ``base.qss``.
-    """
+    """A single rounded sidebar destination wired to a shared QAction."""
 
     def __init__(
         self,
@@ -42,18 +36,16 @@ class SidebarRow(QtWidgets.QPushButton):
         self.setText(label)
         self.setObjectName("sidebarRow")
         self.setProperty("active", False)
-
-        # Wire click → action.trigger()
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
         self.clicked.connect(self._action.trigger)
 
     def apply_tokens(self, tokens: ThemeTokens) -> None:
-        """Refresh this row's palette after the global theme changes."""
         self._tokens = tokens
         self.style().unpolish(self)
         self.style().polish(self)
 
     def apply_density(self, density: Density) -> None:
-        """Refresh this row's height after the global density changes."""
         self._density = density
         self.setFixedHeight(density.nav_height)
 
@@ -73,20 +65,13 @@ class SidebarRow(QtWidgets.QPushButton):
 
 
 class AppSidebar(QtWidgets.QWidget):
-    """Fixed-width sidebar with 4 navigation rows.
+    """Branded fixed-width application navigation.
 
-    Parameters
-    ----------
-    actions : dict[PageId, QtGui.QAction]
-        One QAction per top-level page.  The same QAction instances
-        are wired into the sidebar row and the menu bar.
-    tokens : ThemeTokens
-        Colour tokens for the active / inactive visual.
-    density : Density
-        Used for row height (``nav_height``).
+    The sidebar deliberately contains only top-level destinations.  Page-level
+    tools live in each page header, preventing the navigation rail from turning
+    into a second toolbar.
     """
 
-    # Emitted when a row is clicked (after the action triggers).
     row_activated = QtCore.pyqtSignal(PageId)
 
     def __init__(
@@ -102,40 +87,32 @@ class AppSidebar(QtWidgets.QWidget):
         self._rows: dict[PageId, SidebarRow] = {}
 
         self.setFixedWidth(240)
+        self.setMinimumWidth(240)
         self.setObjectName("appSidebar")
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        root = QtWidgets.QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(0)
 
-        # ── Header label ────────────────────────────────────────────────
-        self._header = QtWidgets.QLabel("MINERVA")
-        self._header.setObjectName("sidebarHeader")
-        self._header.setFixedHeight(48)
-        layout.addWidget(self._header)
+        root.addWidget(self._build_brand())
+        root.addSpacing(22)
 
-        # ── Separator ────────────────────────────────────────────────────
-        self._separator = QtWidgets.QFrame()
-        self._separator.setObjectName("sidebarSeparator")
-        self._separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        self._separator.setFixedHeight(1)
-        layout.addWidget(self._separator)
+        section = QtWidgets.QLabel("WORKSPACE")
+        section.setObjectName("sidebarSectionLabel")
+        root.addWidget(section)
 
-        # ── Sidebar rows (4 destinations) ────────────────────────────────
         icon_map = {
             PageId.REPORTS: Icons.reports(),
             PageId.LIBRARY: Icons.library(),
             PageId.DOWNLOADS: Icons.download(),
             PageId.SETTINGS: Icons.settings(),
         }
-
         label_map = {
             PageId.REPORTS: "Reports",
             PageId.LIBRARY: "Library",
             PageId.DOWNLOADS: "Downloads",
             PageId.SETTINGS: "Settings",
         }
-
         order = [
             PageId.REPORTS,
             PageId.LIBRARY,
@@ -143,61 +120,104 @@ class AppSidebar(QtWidgets.QWidget):
             PageId.SETTINGS,
         ]
 
+        nav = QtWidgets.QWidget()
+        nav_layout = QtWidgets.QVBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(5)
         for pid in order:
             if pid not in actions:
                 continue
-            action = actions[pid]
-            icon = icon_map[pid]
-            label = label_map[pid]
             row = SidebarRow(
                 page_id=pid,
-                icon=icon,
-                label=label,
-                action=action,
+                icon=icon_map[pid],
+                label=label_map[pid],
+                action=actions[pid],
                 tokens=tokens,
                 density=density,
             )
             self._rows[pid] = row
-            layout.addWidget(row)
+            nav_layout.addWidget(row)
+        root.addWidget(nav)
+        root.addStretch(1)
 
-        layout.addStretch(1)
-
-        # ── Selection badge ───────────────────────────────────────────────
-        self._selection_badge = QtWidgets.QLabel("", self)
+        self._selection_badge = QtWidgets.QLabel("")
         self._selection_badge.setObjectName("selectionBadge")
         self._selection_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self._selection_badge.setFixedHeight(28)
-        layout.addWidget(self._selection_badge)
+        self._selection_badge.setVisible(False)
+        root.addWidget(
+            self._selection_badge,
+            alignment=QtCore.Qt.AlignmentFlag.AlignHCenter,
+        )
+        root.addSpacing(10)
+        root.addWidget(self._build_footer())
 
-    # ── Selection badge ─────────────────────────────────────────────────
+    @staticmethod
+    def _build_brand() -> QtWidgets.QWidget:
+        brand = QtWidgets.QWidget()
+        brand.setObjectName("sidebarBrand")
+        layout = QtWidgets.QHBoxLayout(brand)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(11)
+
+        logo = QtWidgets.QLabel("M")
+        logo.setObjectName("sidebarLogo")
+        logo.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(logo)
+
+        text = QtWidgets.QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(1)
+        header = QtWidgets.QLabel("MINERVA")
+        header.setObjectName("sidebarHeader")
+        subtitle = QtWidgets.QLabel("CAN FIXDAT")
+        subtitle.setObjectName("sidebarSubtitle")
+        text.addWidget(header)
+        text.addWidget(subtitle)
+        layout.addLayout(text, 1)
+        return brand
+
+    @staticmethod
+    def _build_footer() -> QtWidgets.QFrame:
+        footer = QtWidgets.QFrame()
+        footer.setObjectName("sidebarFooter")
+        layout = QtWidgets.QHBoxLayout(footer)
+        layout.setContentsMargins(11, 9, 11, 9)
+        layout.setSpacing(8)
+
+        dot = QtWidgets.QLabel("●")
+        dot.setObjectName("sidebarFooterDot")
+        layout.addWidget(dot)
+
+        text = QtWidgets.QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(1)
+        title = QtWidgets.QLabel("Local workspace")
+        title.setObjectName("sidebarFooterTitle")
+        subtitle = QtWidgets.QLabel("Minerva 0.1")
+        subtitle.setObjectName("sidebarFooterSubtitle")
+        text.addWidget(title)
+        text.addWidget(subtitle)
+        layout.addLayout(text, 1)
+        return footer
 
     def set_selection_count(self, count: int) -> None:
-        """Show how many items are currently selected."""
-        if count > 0:
-            self._selection_badge.setText(f"{count} selected")
-        else:
-            self._selection_badge.setText("")
+        self._selection_badge.setText(f"{count} selected" if count > 0 else "")
+        self._selection_badge.setVisible(count > 0)
 
     @property
     def rows(self) -> dict[PageId, SidebarRow]:
         return self._rows
 
     def set_active(self, page_id: PageId) -> None:
-        """Highlight the row for *page_id* and deactivate others."""
         for pid, row in self._rows.items():
             row.set_active(pid == page_id)
 
-    # ── Theme reactivity ───────────────────────────────────────────────
-
     def apply_tokens(self, tokens: ThemeTokens) -> None:
-        """Propagate new colour tokens to rows. QSS handles the rest."""
         self._tokens = tokens
         for child in self.findChildren(SidebarRow):
             child.apply_tokens(tokens)
 
     def apply_density(self, density: Density) -> None:
-        """Propagate new density to every row."""
         self._density = density
-        for child in self.findChildren(QtWidgets.QWidget):
-            if isinstance(child, SidebarRow):
-                child.apply_density(density)
+        for child in self.findChildren(SidebarRow):
+            child.apply_density(density)

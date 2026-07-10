@@ -1,0 +1,33 @@
+/* Cards, summary strips and compact dashboard metrics. */
+QFrame#surfaceCard,
+QFrame#surfacePanel,
+QFrame#navigatorPanel,
+QFrame#workspacePanel,
+QFrame#inspectorPanel,
+QFrame#metricCard {
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_lg}};
+}
+QFrame#metricCard {
+    min-height: 74px;
+    max-height: 86px;
+}
+QFrame#metricCard:hover { border-color: {{token.border_strong}}; }
+QFrame#metricIconContainer {
+    background: {{token.surface_raised}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+}
+QLabel#summaryStrip {
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 8px 12px;
+    color: {{token.text_muted}};
+}
+QLabel#coverPreview {
+    background: {{token.surface_sunken}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+}

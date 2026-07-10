@@ -1,0 +1,230 @@
+--- minerva/ui/widgets/download_inspector.py
++++ minerva/ui/widgets/download_inspector.py
+@@ -27,91 +29,182 @@ class DownloadInspector(InspectorScaffold):
+     open_folder_requested = QtCore.pyqtSignal(str)
+ 
+     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+-        super().__init__("Current task", parent=parent)
+-        self.setMinimumWidth(310)
++        super().__init__(parent)
++        self.setObjectName("downloadInspectorPanel")
++        self.setMinimumWidth(350)
++        self.setMaximumWidth(480)
+         self._record: DownloadRecord | None = None
++        self._stats_values: dict[str, QtWidgets.QLabel] = {}
+ 
+-        # ── Hero: cover + title/scope/torrent ───────────────────────────
+-        hero_row = QtWidgets.QHBoxLayout()
+-        hero_row.setSpacing(14)
+-        self._cover = CoverLabel(76, 104)
+-        hero_row.addWidget(self._cover, 0, QtCore.Qt.AlignmentFlag.AlignTop)
++        root = QtWidgets.QVBoxLayout(self)
++        root.setContentsMargins(18, 16, 18, 16)
++        root.setSpacing(14)
++
++        heading = QtWidgets.QLabel("Selected download")
++        heading.setObjectName("downloadInspectorHeading")
++        root.addWidget(heading)
++        root.addWidget(self._separator())
++
++        # Hero
++        hero = QtWidgets.QHBoxLayout()
++        hero.setSpacing(14)
++        self._cover = CoverLabel(76, 76)
++        self._cover.setObjectName("downloadInspectorCover")
++        hero.addWidget(self._cover, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+ 
+         hero_text = QtWidgets.QVBoxLayout()
+         hero_text.setSpacing(4)
+         self._title = QtWidgets.QLabel("Select a download")
+-        self._title.setObjectName("inspectorTitle")
++        self._title.setObjectName("downloadInspectorTitle")
+         self._title.setWordWrap(True)
+         hero_text.addWidget(self._title)
+         self._scope = QtWidgets.QLabel("Queue details will appear here")
+-        self._scope.setObjectName("mutedLabel")
++        self._scope.setObjectName("downloadInspectorSubtitle")
+         self._scope.setWordWrap(True)
+         hero_text.addWidget(self._scope)
+         self._torrent = QtWidgets.QLabel("")
+-        self._torrent.setObjectName("mutedLabel")
++        self._torrent.setObjectName("downloadInspectorTorrent")
+         self._torrent.setWordWrap(True)
+         hero_text.addWidget(self._torrent)
+         hero_text.addStretch(1)
+-        hero_row.addLayout(hero_text, 1)
+-        self.hero_layout.addLayout(hero_row)
++        hero.addLayout(hero_text, 1)
++        root.addLayout(hero)
+ 
+-        # ── Status ──────────────────────────────────────────────────────
+         self._status_badge = StatusBadge("No selection", BadgeKind.NEUTRAL)
+-        self.status_layout.addWidget(self._status_badge)
++        root.addWidget(self._status_badge, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
++        root.addWidget(self._separator())
+ 
+-        # ── Body: progress + metadata + destination + error ─────────────
++        # Progress
++        progress_header = QtWidgets.QHBoxLayout()
+         self._progress_label = QtWidgets.QLabel("Overall progress")
+-        self._progress_label.setObjectName("mutedLabel")
+-        self.body_layout.addWidget(self._progress_label)
++        self._progress_label.setObjectName("downloadInspectorLabel")
++        progress_header.addWidget(self._progress_label)
++        progress_header.addStretch(1)
++        self._progress_value = QtWidgets.QLabel("0%")
++        self._progress_value.setObjectName("downloadInspectorValue")
++        progress_header.addWidget(self._progress_value)
++        root.addLayout(progress_header)
++
+         self._progress = QtWidgets.QProgressBar()
+         self._progress.setObjectName("downloadInspectorProgress")
+         self._progress.setRange(0, 100)
+-        self._progress.setTextVisible(True)
+-        self.body_layout.addWidget(self._progress)
+-
+-        self._properties = PropertyList(
+-            [
+-                ("Download speed", "\u2014"),
+-                ("Upload speed", "\u2014"),
+-                ("Peers / Seeds", "\u2014"),
+-                ("Ratio", "\u2014"),
+-            ],
+-        )
+-        self.body_layout.addWidget(self._properties)
++        self._progress.setTextVisible(False)
++        root.addWidget(self._progress)
++
++        stats = QtWidgets.QFrame()
++        stats.setObjectName("downloadInspectorStats")
++        stats_layout = QtWidgets.QVBoxLayout(stats)
++        stats_layout.setContentsMargins(0, 4, 0, 4)
++        stats_layout.setSpacing(0)
++        for key, label, icon in (
++            ("down", "Download speed", Icons.download()),
++            ("up", "Upload speed", Icons.upload()),
++            ("eta", "ETA", Icons.activity()),
++            ("seeds", "Seeds", Icons.queue()),
++            ("ratio", "Ratio", Icons.chart()),
++        ):
++            stats_layout.addWidget(self._build_stat_row(key, label, icon))
++        root.addWidget(stats)
+ 
+-        dest_title = QtWidgets.QLabel("Destination")
+-        dest_title.setObjectName("mutedLabel")
+-        self.body_layout.addWidget(dest_title)
+         self._destination = QtWidgets.QLabel("\u2014")
+-        self._destination.setObjectName("propertyListValue")
+-        self._destination.setWordWrap(True)
++        self._destination.setObjectName("downloadInspectorDestination")
+         self._destination.setTextInteractionFlags(
+             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+         )
+-        self.body_layout.addWidget(self._destination)
++        self._destination.setVisible(False)
++        root.addWidget(self._destination)
+ 
+         self._error = QtWidgets.QLabel("")
+         self._error.setObjectName("downloadInspectorError")
+         self._error.setWordWrap(True)
+         self._error.hide()
+-        self.body_layout.addWidget(self._error)
++        root.addWidget(self._error)
++        root.addStretch(1)
+ 
+-        # ── Actions ─────────────────────────────────────────────────────
+-        self._open_btn = self._make_button("Open folder", Icons.folder_open(), "actionGroupSecondary")
+-        self._toggle_btn = self._make_button("Pause", Icons.pause(), "actionGroupSecondary")
+-        self._retry_btn = self._make_button("Retry", Icons.retry(), "actionGroupDestructive")
+-        self._remove_btn = self._make_button("Remove from queue", Icons.trash(), "actionGroupDestructive")
+-        for button in (self._open_btn, self._toggle_btn, self._retry_btn, self._remove_btn):
+-            self.actions_layout.addWidget(button)
++        # Sticky action block
++        root.addWidget(self._separator())
++        action_label = QtWidgets.QLabel("Actions")
++        action_label.setObjectName("downloadInspectorLabel")
++        root.addWidget(action_label)
++
++        action_row = QtWidgets.QHBoxLayout()
++        action_row.setSpacing(8)
++        self._open_btn = self._make_button(
++            "Open folder", Icons.folder_open(), "downloadInspectorAction"
++        )
++        self._toggle_btn = self._make_button(
++            "Pause", Icons.pause(), "downloadInspectorAction"
++        )
++        self._more_btn = QtWidgets.QToolButton()
++        self._more_btn.setObjectName("downloadInspectorAction")
++        self._more_btn.setText("More")
++        self._more_btn.setIcon(Icons.settings())
++        self._more_btn.setToolButtonStyle(
++            QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon
++        )
++        self._more_btn.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
++        self._more_menu = QtWidgets.QMenu(self._more_btn)
++        self._retry_action = self._more_menu.addAction(Icons.retry(), "Retry")
++        self._copy_path_action = self._more_menu.addAction(Icons.copy(), "Copy destination")
++        self._more_btn.setMenu(self._more_menu)
++        action_row.addWidget(self._open_btn, 1)
++        action_row.addWidget(self._toggle_btn, 1)
++        action_row.addWidget(self._more_btn, 1)
++        root.addLayout(action_row)
++
++        self._remove_btn = self._make_button(
++            "Remove from queue", Icons.trash(), "downloadInspectorRemove"
++        )
++        root.addWidget(self._remove_btn)
++        # Compatibility alias for callers/tests from the previous inspector.
++        self._retry_btn = QtWidgets.QPushButton()
++        self._retry_btn.hide()
+ 
+         self._open_btn.clicked.connect(self._emit_open)
+         self._toggle_btn.clicked.connect(self._emit_toggle)
+-        self._retry_btn.clicked.connect(self._emit_retry)
++        self._retry_action.triggered.connect(self._emit_retry)
++        self._copy_path_action.triggered.connect(self._copy_destination)
+         self._remove_btn.clicked.connect(self._emit_remove)
+         self.clear()
+ 
+     @staticmethod
+-    def _make_button(text: str, icon: QtGui.QIcon, object_name: str) -> QtWidgets.QPushButton:
++    def _separator() -> QtWidgets.QFrame:
++        line = QtWidgets.QFrame()
++        line.setObjectName("downloadInspectorSeparator")
++        line.setFixedHeight(1)
++        return line
++
++    def _build_stat_row(
++        self,
++        key: str,
++        label: str,
++        icon: QtGui.QIcon,
++    ) -> QtWidgets.QWidget:
++        row = QtWidgets.QWidget()
++        row.setObjectName("downloadInspectorStatRow")
++        layout = QtWidgets.QHBoxLayout(row)
++        layout.setContentsMargins(4, 8, 4, 8)
++        layout.setSpacing(10)
++        icon_label = QtWidgets.QLabel()
++        icon_label.setObjectName("downloadInspectorStatIcon")
++        icon_label.setPixmap(icon.pixmap(15, 15))
++        layout.addWidget(icon_label)
++        key_label = QtWidgets.QLabel(label)
++        key_label.setObjectName("downloadInspectorLabel")
++        layout.addWidget(key_label)
++        layout.addStretch(1)
++        value = QtWidgets.QLabel("\u2014")
++        value.setObjectName("downloadInspectorValue")
++        layout.addWidget(value)
++        self._stats_values[key] = value
++        return row
++
++    @staticmethod
++    def _make_button(
++        text: str,
++        icon: QtGui.QIcon,
++        object_name: str,
++    ) -> QtWidgets.QPushButton:
+         button = QtWidgets.QPushButton(text)
+         button.setIcon(icon)
+         button.setObjectName(object_name)

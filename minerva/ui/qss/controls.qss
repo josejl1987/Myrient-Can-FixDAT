@@ -1,0 +1,214 @@
+/* Controls: fields, buttons, toggles, progress, tabs. */
+
+/* ── Text inputs / selectors ──────────────────────────────────────────── */
+QLineEdit,
+QComboBox,
+QSpinBox,
+QDoubleSpinBox {
+    min-height: {{density.control_height}}px;
+    background-color: {{token.surface_sunken}};
+    color: {{token.text}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 3px 11px;
+    selection-background-color: {{token.accent}};
+    font-size: 12px;
+}
+QLineEdit:hover,
+QComboBox:hover,
+QSpinBox:hover,
+QDoubleSpinBox:hover { border-color: {{token.border_strong}}; }
+QLineEdit:focus,
+QComboBox:focus,
+QSpinBox:focus,
+QDoubleSpinBox:focus { border: 1px solid {{token.focus_ring}}; }
+QLineEdit:disabled,
+QComboBox:disabled,
+QSpinBox:disabled,
+QDoubleSpinBox:disabled {
+    color: {{token.disabled_text}};
+    background: {{token.surface}};
+}
+QComboBox::drop-down { border: none; width: 24px; }
+QComboBox QAbstractItemView {
+    background-color: {{token.surface}};
+    color: {{token.text}};
+    selection-background-color: {{token.surface_hover}};
+    selection-color: {{token.text}};
+    border: 1px solid {{token.border_strong}};
+    outline: none;
+    padding: 4px;
+}
+
+/* ── Buttons ──────────────────────────────────────────────────────────── */
+QPushButton,
+QToolButton {
+    min-height: {{density.control_height}}px;
+    background-color: {{token.surface_raised}};
+    color: {{token.text}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 3px 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
+QPushButton:hover,
+QToolButton:hover {
+    background: {{token.surface_hover}};
+    border-color: {{token.border_strong}};
+}
+QPushButton:pressed,
+QToolButton:pressed { background: {{token.surface_sunken}}; }
+QPushButton:focus,
+QToolButton:focus { border: 1px solid {{token.focus_ring}}; }
+QPushButton:disabled,
+QToolButton:disabled {
+    color: {{token.disabled_text}};
+    border-color: {{token.border}};
+    background: {{token.surface}};
+}
+QPushButton#primaryButton,
+QPushButton#accentButton,
+QPushButton#confirmButton {
+    background: {{token.accent}};
+    color: white;
+    border-color: {{token.accent}};
+    font-weight: 700;
+}
+QPushButton#primaryButton:hover,
+QPushButton#accentButton:hover,
+QPushButton#confirmButton:hover {
+    background: {{token.accent_hover}};
+    border-color: {{token.accent_hover}};
+}
+QPushButton#primaryButton:pressed,
+QPushButton#accentButton:pressed,
+QPushButton#confirmButton:pressed {
+    background: {{token.accent_pressed}};
+    border-color: {{token.accent_pressed}};
+}
+QPushButton#dangerButton {
+    background: transparent;
+    color: {{token.error}};
+    border-color: {{token.error_border}};
+}
+QPushButton#dangerButton:hover { background: {{token.error_surface}}; }
+QPushButton#subtleButton,
+QPushButton#cancelButton {
+    background: {{token.surface_raised}};
+    color: {{token.text}};
+}
+QPushButton#ghostButton {
+    background: transparent;
+    border-color: transparent;
+    color: {{token.text_muted}};
+}
+QPushButton#ghostButton:hover {
+    background: {{token.surface_hover}};
+    color: {{token.text}};
+}
+QToolButton#iconButton,
+QToolButton#headerOverflowButton {
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    padding: 0;
+}
+QToolButton#iconButton {
+    background: transparent;
+    border-color: transparent;
+}
+QToolButton#iconButton:hover {
+    background: {{token.surface_hover}};
+    border-color: {{token.border}};
+}
+QToolButton#headerOverflowButton {
+    background: {{token.surface_raised}};
+    border-color: {{token.border}};
+    font-size: 18px;
+}
+
+/* ── Checks / radios ──────────────────────────────────────────────────── */
+QCheckBox,
+QRadioButton {
+    color: {{token.text}};
+    spacing: 7px;
+    font-size: 12px;
+}
+QCheckBox::indicator,
+QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid {{token.border_strong}};
+    background: {{token.surface_sunken}};
+}
+QCheckBox::indicator { border-radius: 5px; }
+QRadioButton::indicator { border-radius: 8px; }
+QCheckBox::indicator:checked,
+QRadioButton::indicator:checked {
+    background: {{token.accent}};
+    border-color: {{token.accent}};
+}
+
+/* ── Progress ─────────────────────────────────────────────────────────── */
+QProgressBar {
+    min-height: 7px;
+    max-height: 7px;
+    background: {{token.surface_raised}};
+    border: none;
+    border-radius: 3px;
+    color: transparent;
+    text-align: center;
+}
+QProgressBar::chunk {
+    background: {{token.accent}};
+    border-radius: 3px;
+}
+
+/* ── Segmented controls and chips ─────────────────────────────────────── */
+QFrame#segmentedControl {
+    background: {{token.surface_sunken}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 2px;
+}
+QPushButton#segmentButton {
+    min-height: 28px;
+    background: transparent;
+    color: {{token.text_muted}};
+    border: none;
+    border-radius: 7px;
+    padding: 1px 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+QPushButton#segmentButton:hover {
+    background: {{token.surface_hover}};
+    color: {{token.text}};
+}
+QPushButton#segmentButton:checked {
+    background: {{token.surface_raised}};
+    color: {{token.text}};
+}
+QPushButton#filterChip {
+    min-height: 25px;
+    max-height: 27px;
+    background: transparent;
+    color: {{token.text_muted}};
+    border: 1px solid {{token.border}};
+    border-radius: 13px;
+    padding: 1px 10px;
+    font-size: 10px;
+    font-weight: 600;
+}
+QPushButton#filterChip:hover {
+    color: {{token.text}};
+    border-color: {{token.border_strong}};
+    background: {{token.surface_hover}};
+}
+QPushButton#filterChip:checked {
+    color: {{token.info_fg}};
+    border-color: {{token.info_border}};
+    background: {{token.info_bg}};
+}

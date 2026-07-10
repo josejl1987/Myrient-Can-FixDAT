@@ -69,16 +69,16 @@ def make_model(records: list[DownloadRecord] | None = None) -> DownloadTableMode
 
 def test_column_count():
     """GIVEN a DownloadTableModel WHEN columnCount is queried THEN it
-    returns 8."""
+    returns 9."""
     model = make_model()
-    assert model.columnCount() == 8
+    assert model.columnCount() == 9
 
 
 def test_column_headers():
     """GIVEN a DownloadTableModel WHEN headerData is queried for each
     column THEN the headers match the spec."""
     model = make_model()
-    expected = ["", "File", "Progress", "Speed", "ETA", "Seeds", "Ratio", "Actions"]
+    expected = ["Name", "Status", "Progress", "Down", "Up", "ETA", "Seeds", "Ratio", ""]
     for col, exp in enumerate(expected):
         header = model.headerData(
             col, Qt.Orientation.Horizontal, Qt.ItemDataRole.DisplayRole,
@@ -91,23 +91,20 @@ def test_column_headers():
 # ============================================================================
 
 
-def test_status_icon_in_status_column(qtbot):
-    """GIVEN a model with a QUEUED download WHEN column 0 data is
-    queried with DisplayRole THEN it returns a status icon string."""
+def test_status_display_in_status_column(qtbot):
+    """The status column exposes a readable semantic label."""
     records = [make_download(status=DownloadStatus.QUEUED)]
     model = make_model(records)
-    idx = model.index(0, 0)
-    icon = idx.data(Qt.ItemDataRole.DisplayRole)
-    assert isinstance(icon, str)
-    assert len(icon) > 0
+    idx = model.index(0, 1)
+    assert idx.data(Qt.ItemDataRole.DisplayRole) == "Queued"
 
 
 def test_filename_display(qtbot):
-    """GIVEN a model with a download WHEN column 1 data is queried
+    """GIVEN a model with a download WHEN column 0 data is queried
     with DisplayRole THEN it returns the torrent/file name."""
-    records = [make_download(torrent_name="my_rom.zip")]
+    records = [make_download(filename="my_rom.zip")]
     model = make_model(records)
-    idx = model.index(0, 1)
+    idx = model.index(0, 0)
     assert idx.data(Qt.ItemDataRole.DisplayRole) == "my_rom.zip"
 
 
@@ -133,48 +130,48 @@ def test_speed_display_downloading(qtbot):
 
 def test_speed_display_not_downloading(qtbot):
     """GIVEN a QUEUED record WHEN column 3 data is queried with
-    DisplayRole THEN an empty string is returned."""
+    DisplayRole THEN an em dash is returned."""
     records = [make_download(status=DownloadStatus.QUEUED, speed=2_097_152)]
     model = make_model(records)
     idx = model.index(0, 3)
-    assert idx.data(Qt.ItemDataRole.DisplayRole) == ""
+    assert idx.data(Qt.ItemDataRole.DisplayRole) == "\u2014"
 
 
 def test_eta_display(qtbot):
-    """GIVEN a DOWNLOADING record WHEN column 4 data is queried with
+    """GIVEN a DOWNLOADING record WHEN column 5 data is queried with
     DisplayRole THEN a formatted ETA string is returned."""
     records = [make_download(status=DownloadStatus.DOWNLOADING, eta_seconds=90)]
     model = make_model(records)
-    idx = model.index(0, 4)
+    idx = model.index(0, 5)
     val = idx.data(Qt.ItemDataRole.DisplayRole)
     assert isinstance(val, str)
     assert "1m" in val
 
 
 def test_seeds_display(qtbot):
-    """GIVEN a model WHEN column 5 data is queried with
+    """GIVEN a model WHEN column 6 data is queried with
     DisplayRole THEN the seed count string is returned."""
     records = [make_download(seeds=5)]
     model = make_model(records)
-    idx = model.index(0, 5)
+    idx = model.index(0, 6)
     assert idx.data(Qt.ItemDataRole.DisplayRole) == "5"
 
 
 def test_ratio_display(qtbot):
-    """GIVEN a model WHEN column 6 data is queried with
+    """GIVEN a model WHEN column 7 data is queried with
     DisplayRole THEN the ratio string is returned."""
     records = [make_download(ratio=1.5)]
     model = make_model(records)
-    idx = model.index(0, 6)
+    idx = model.index(0, 7)
     assert "1.50" in idx.data(Qt.ItemDataRole.DisplayRole)
 
 
 def test_actions_user_role_returns_status(qtbot):
-    """GIVEN a model WHEN column 7 data is queried with UserRole THEN
+    """GIVEN a model WHEN column 8 data is queried with UserRole THEN
     the DownloadStatus enum is returned."""
     records = [make_download(status=DownloadStatus.COMPLETED)]
     model = make_model(records)
-    idx = model.index(0, 7)
+    idx = model.index(0, 8)
     status = idx.data(Qt.ItemDataRole.UserRole)
     assert status == DownloadStatus.COMPLETED
 

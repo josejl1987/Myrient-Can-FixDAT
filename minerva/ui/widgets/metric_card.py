@@ -1,4 +1,4 @@
-"""Restrained KPI card with semantic icon and value colour."""
+"""Compact application KPI card with semantic icon treatment."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class MetricKind(Enum):
 
 
 class MetricCard(QtWidgets.QFrame):
-    """Dashboard KPI card that keeps semantic colour subordinate to the value."""
+    """A compact metric tile: icon + label/context + value."""
 
     def __init__(
         self,
@@ -39,62 +39,56 @@ class MetricCard(QtWidgets.QFrame):
         self._density = density
         self._kind = kind
         self._icon = icon
-
         self.setObjectName("metricCard")
 
         root = QtWidgets.QHBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        body = QtWidgets.QVBoxLayout()
-        body.setContentsMargins(
-            density.card_padding,
-            max(6, density.card_padding - 4),
-            density.card_padding,
-            max(6, density.card_padding - 4),
-        )
-        body.setSpacing(4)
-        root.addLayout(body, 1)
-
-        top = QtWidgets.QHBoxLayout()
-        top.setContentsMargins(0, 0, 0, 0)
-        top.setSpacing(9)
+        root.setContentsMargins(13, 11, 13, 11)
+        root.setSpacing(11)
 
         self._icon_container = QtWidgets.QFrame()
         self._icon_container.setObjectName("metricIconContainer")
-        self._icon_container.setFixedSize(28, 28)
+        self._icon_container.setFixedSize(34, 34)
         icon_layout = QtWidgets.QVBoxLayout(self._icon_container)
-        icon_layout.setContentsMargins(6, 6, 6, 6)
+        icon_layout.setContentsMargins(8, 8, 8, 8)
         self.icon_widget = QtWidgets.QLabel()
         self.icon_widget.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.icon_widget.setScaledContents(True)
         icon_layout.addWidget(self.icon_widget)
         self._icon_container.setVisible(icon is not None)
-        top.addWidget(self._icon_container)
+        root.addWidget(self._icon_container)
 
+        text = QtWidgets.QVBoxLayout()
+        text.setContentsMargins(0, 0, 0, 0)
+        text.setSpacing(2)
         self.label_widget = QtWidgets.QLabel(label)
         self.label_widget.setObjectName("metricTitle")
-        top.addWidget(self.label_widget, 1)
-        body.addLayout(top)
-
-        self.value_widget = QtWidgets.QLabel(value)
-        self.value_widget.setObjectName("metricValue")
-        body.addWidget(self.value_widget)
-
+        text.addWidget(self.label_widget)
         self.subtitle_widget = QtWidgets.QLabel(subtitle)
         self.subtitle_widget.setObjectName("metricSubtitle")
         self.subtitle_widget.setVisible(bool(subtitle))
-        body.addWidget(self.subtitle_widget)
+        self.subtitle_widget.setTextInteractionFlags(
+            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        text.addWidget(self.subtitle_widget)
+        root.addLayout(text, 1)
+
+        self.value_widget = QtWidgets.QLabel(value)
+        self.value_widget.setObjectName("metricValue")
+        self.value_widget.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignRight
+            | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        root.addWidget(self.value_widget)
 
         self._apply_semantic_style()
 
-    def _colour(self) -> tuple[str, str]:
+    def _colour(self) -> tuple[str, str, str]:
         colour = {
             MetricKind.NEUTRAL: self._tokens.text_muted,
             MetricKind.SUCCESS: self._tokens.success,
             MetricKind.WARNING: self._tokens.warning,
             MetricKind.ERROR: self._tokens.error,
-            MetricKind.INFO: self._tokens.accent,
+            MetricKind.INFO: self._tokens.info_fg,
             MetricKind.PURPLE: self._tokens.purple,
         }[self._kind]
         soft = {
@@ -105,17 +99,27 @@ class MetricCard(QtWidgets.QFrame):
             MetricKind.INFO: self._tokens.info_surface,
             MetricKind.PURPLE: self._tokens.purple_surface,
         }[self._kind]
-        return colour, soft
+        border = {
+            MetricKind.NEUTRAL: self._tokens.border,
+            MetricKind.SUCCESS: self._tokens.success_border,
+            MetricKind.WARNING: self._tokens.warning_border,
+            MetricKind.ERROR: self._tokens.error_border,
+            MetricKind.INFO: self._tokens.info_border,
+            MetricKind.PURPLE: self._tokens.purple_border,
+        }[self._kind]
+        return colour, soft, border
 
     def _apply_semantic_style(self) -> None:
-        colour, soft = self._colour()
+        colour, soft, border = self._colour()
         self._icon_container.setStyleSheet(
             "QFrame#metricIconContainer {"
-            f" background: {soft}; border: 1px solid {colour}; border-radius: {self._tokens.radius_md};"
+            f"background: {soft}; border: 1px solid {border}; "
+            f"border-radius: {self._tokens.radius_md};"
             "}"
         )
+        self.value_widget.setStyleSheet(f"color: {colour};")
         if self._icon is not None:
-            self.icon_widget.setPixmap(self._icon.pixmap(16, 16))
+            self.icon_widget.setPixmap(self._icon.pixmap(17, 17))
 
     def set_value(self, text: str) -> None:
         self.value_widget.setText(text)

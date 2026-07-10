@@ -1,0 +1,309 @@
+--- minerva/ui/models/torrent_group.py
++++ minerva/ui/models/torrent_group.py
+@@ -11,27 +11,30 @@ from PyQt6 import QtCore
+ from minerva.domain.downloads import DownloadStatus
+ from minerva.ui.models.download_model import (
+     DownloadRecord,
+-    _status_icon,
+     format_eta,
+     format_speed,
++    status_text,
+ )
+ 
++# Extra roles consumed by the rich queue delegates.  They deliberately live
++# outside the ordinary DisplayRole/UserRole contract so the model remains
++# usable with standard Qt views and sorting proxies.
++IS_GROUP_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
++SUBTITLE_ROLE = IS_GROUP_ROLE + 1
++RECORD_ROLE = SUBTITLE_ROLE + 1
++STATUS_ROLE = RECORD_ROLE + 1
++GROUP_ROLE = STATUS_ROLE + 1
++
+ 
+ @dataclass
+ class TorrentGroup:
+-    """Aggregate view of one torrent and its selected files.
+-
+-    Created by grouping ``DownloadRecord`` entries by ``torrent_hash``
+-    (or ``torrent_name`` for unsubmitted torrents).  Computed properties
+-    summarise the group for the card header.
+-    """
++    """Aggregate view of one torrent and its selected files."""
+ 
+     key: str
+     torrent_name: str
+     torrent_hash: str | None
+     files: list[DownloadRecord]
+ 
+-    # ── Status priority (worst-case wins) ──────────────────────────────
+     _STATUS_PRIORITY: ClassVar[dict[DownloadStatus, int]] = {
+         DownloadStatus.FAILED: 0,
+         DownloadStatus.DOWNLOADING: 1,
+@@ -209,60 +252,37 @@ def group_records_by_mode(
+     records: list[DownloadRecord],
+     mode: GroupMode,
+ ) -> list[GroupedDownloads]:
+-    """Group records by *mode* (torrent, report, or platform).
+-
+-    Within each top-level section records are still split into
+-    :class:`TorrentGroup` buckets.
+-    """
+     torrent_groups = group_records(records)
+ 
+     if mode == GroupMode.TORRENT:
+         return [
+             GroupedDownloads(
+-                key=g.key,
+-                label=g.torrent_label,
+-                sublabel="",
+-                groups=[g],
++                key=group.key,
++                label=group.torrent_label,
++                groups=[group],
+             )
+-            for g in torrent_groups
++            for group in torrent_groups
+         ]
+ 
+     buckets: dict[str, GroupedDownloads] = {}
+-    for g in torrent_groups:
++    for group in torrent_groups:
+         if mode == GroupMode.REPORT:
+-            key = g.files[0].report_id or "__no_report__"
+-            label = g.files[0].report_name or "Unknown report"
+-        else:  # GroupMode.PLATFORM
+-            key = g.files[0].system or "__no_platform__"
+-            label = g.files[0].system or "Unknown platform"
++            key = group.files[0].report_id or "__no_report__"
++            label = group.files[0].report_name or "Unknown report"
++        else:
++            key = group.files[0].system or "__no_platform__"
++            label = group.files[0].system or "Unknown platform"
+ 
+         if key in buckets:
+-            buckets[key].groups.append(g)
++            buckets[key].groups.append(group)
+         else:
+-            buckets[key] = GroupedDownloads(key=key, label=label, groups=[g])
++            buckets[key] = GroupedDownloads(key=key, label=label, groups=[group])
+ 
+     return list(buckets.values())
+ 
+ 
+-# ── Tree model for QTreeView ─────────────────────────────────────────────
+-
+-
+ class TorrentGroupTreeModel(QtCore.QAbstractItemModel):
+-    """Tree model that groups DownloadRecords by torrent.
+-
+-    Structure:
+-        root ─→ TorrentGroup (row, expandable)
+-                  └── DownloadRecord (child row, leaf)
+-
+-    Group rows expose aggregate data from TorrentGroup properties.
+-    Leaf rows expose individual DownloadRecord data via the same column
+-    accessor functions.
+-
+-    Usage::
+-
+-        model = TorrentGroupTreeModel(groups, _DOWNLOAD_COLUMNS)
+-        view.setModel(model)
+-    """
++    """Two-level tree model: torrent group rows with file children."""
+ 
+     def __init__(
+         self,
+@@ -273,17 +293,16 @@ class TorrentGroupTreeModel(QtCore.QAbstractItemModel):
+         super().__init__(parent)
+         self._columns: list = columns or []
+         self._groups: list[TorrentGroup] = groups or []
+-        # Flat index for fast lookup by queue_id
+         self._records_by_qid: dict[str, DownloadRecord] = {}
+         self._rebuild_index()
+-    def _rebuild_index(self) -> None:
+-        self._records_by_qid = {}
+-        for group in self._groups:
+-            for rec in group.files:
+-                if rec.queue_id:
+-                    self._records_by_qid[rec.queue_id] = rec
+ 
+-    # ── Public API ───────────────────────────────────────────────────────
++    def _rebuild_index(self) -> None:
++        self._records_by_qid = {
++            record.queue_id: record
++            for group in self._groups
++            for record in group.files
++            if record.queue_id
++        }
+ 
+     def set_groups(self, groups: list[TorrentGroup]) -> None:
+         self.beginResetModel()
+@@ -314,34 +327,31 @@ class TorrentGroupTreeModel(QtCore.QAbstractItemModel):
+         return None
+ 
+     def flat_index_of(self, queue_id: str) -> tuple[int, int] | None:
+-        """Find (group_row, child_row) for a record by queue_id."""
+-        for grp_row, group in enumerate(self._groups):
+-            for child_row, rec in enumerate(group.files):
+-                if rec.queue_id == queue_id:
+-                    return (grp_row, child_row)
++        for group_row, group in enumerate(self._groups):
++            for child_row, record in enumerate(group.files):
++                if record.queue_id == queue_id:
++                    return group_row, child_row
+         return None
+ 
+-    def flat_index(self, group_row: int, child_row: int, column: int = 0) -> QtCore.QModelIndex:
+-        """Build a tree index suitable for ``dataChanged`` emission.
+-
+-        Top-level (child_row == -1) creates a group index (id=0).
+-        Child creates a file index with (group_row+1) as internalId.
+-        """
++    def flat_index(
++        self,
++        group_row: int,
++        child_row: int,
++        column: int = 0,
++    ) -> QtCore.QModelIndex:
+         if child_row < 0:
+             return self.createIndex(group_row, column, 0)
+         return self.createIndex(child_row, column, group_row + 1)
+ 
+     def set_records(self, records: list[DownloadRecord]) -> None:
+-        """Backward-compat: group records by torrent then update the model."""
+         self.set_groups(group_records(records))
+ 
+-    # ── QAbstractItemModel interface ─────────────────────────────────────
+-    #
+-    # Internal-ID convention:
+-    #   group rows  → internalId = 0  (root level)
+-    #   file rows   → internalId = group_row + 1  (offset so 0 never = group)
+-
+-    def index(self, row: int, column: int, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> QtCore.QModelIndex:  # noqa: N802
++    def index(
++        self,
++        row: int,
++        column: int,
++        parent: QtCore.QModelIndex = QtCore.QModelIndex(),
++    ) -> QtCore.QModelIndex:  # noqa: N802
+         if not self.hasIndex(row, column, parent):
+             return QtCore.QModelIndex()
+         if not parent.isValid():
+@@ -389,29 +407,40 @@ class TorrentGroupTreeModel(QtCore.QAbstractItemModel):
+             return QtCore.Qt.ItemFlag.NoItemFlags
+         return QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable
+ 
+-    def data(self, index: QtCore.QModelIndex, role: int = QtCore.Qt.ItemDataRole.DisplayRole) -> object:  # noqa: N802
+-        if not index.isValid():
+-            return None
+-        col = index.column()
+-        if col < 0 or col >= len(self._columns):
++    def data(
++        self,
++        index: QtCore.QModelIndex,
++        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
++    ) -> object:  # noqa: N802
++        if not index.isValid() or not 0 <= index.column() < len(self._columns):
+             return None
+-        spec = self._columns[col]
++
+         is_group = index.internalId() == 0
+-        if is_group:
+-            group = self.group_at(index.row())
+-            if group is None:
+-                return None
+-            raw = _group_column_value(col, group)
+-        else:
+-            group_row = index.internalId() - 1
+-            rec = self.file_at(group_row, index.row())
+-            if rec is None:
+-                return None
+-            # File rows: show individual filename (not torrent name)
+-            if col == 1:
+-                raw = rec.filename
+-            else:
+-                raw = spec.accessor(rec)
++        group = self.group_at(index.row()) if is_group else self.group_at(index.internalId() - 1)
++        if group is None:
++            return None
++        record = None if is_group else self.file_at(index.internalId() - 1, index.row())
++        if not is_group and record is None:
++            return None
++
++        if role == IS_GROUP_ROLE:
++            return is_group
++        if role == GROUP_ROLE:
++            return group
++        if role == RECORD_ROLE:
++            return record
++        if role == STATUS_ROLE:
++            return group.status if is_group else record.status
++        if role == SUBTITLE_ROLE:
++            return group.subtitle if is_group else _record_subtitle(record)
++
++        spec = self._columns[index.column()]
++        raw = (
++            _group_column_value(index.column(), group)
++            if is_group
++            else spec.accessor(record)
++        )
++
+         if role == QtCore.Qt.ItemDataRole.DisplayRole:
+             if spec.format_fn is not None and not is_group:
+                 return spec.format_fn(raw)
+@@ -419,35 +448,39 @@ class TorrentGroupTreeModel(QtCore.QAbstractItemModel):
+         if role == QtCore.Qt.ItemDataRole.UserRole:
+             return raw
+         if role == QtCore.Qt.ItemDataRole.ToolTipRole:
++            if index.column() == 0:
++                title = group.torrent_label if is_group else record.filename
++                subtitle = group.subtitle if is_group else _record_subtitle(record)
++                return f"{title}\n{subtitle}" if subtitle else title
+             return str(raw) if raw is not None else ""
+         return None
+ 
+ 
+-def _group_column_value(col: int, group: TorrentGroup) -> object:
+-    """Aggregate display value for a group row at *col*.
++def _record_subtitle(record: DownloadRecord) -> str:
++    scope = " \u00b7 ".join(part for part in (record.collection, record.system) if part)
++    progress = f"{max(0.0, min(1.0, record.progress)):.0%} complete"
++    return f"{progress} \u00b7 {scope}" if scope else progress
+ 
+-    Columns 2–7 use group aggregate properties.  Column 0 shows the
+-    worst-priority status icon.  Column 1 shows the torrent label
+-    with a file count badge when multi-file.
+-    """
+-    file_count = group.file_count
++
++def _group_column_value(col: int, group: TorrentGroup) -> object:
+     if col == 0:
+-        return _status_icon(group.files[0]) if group.files else "fa5s.question"
++        return group.torrent_label
+     if col == 1:
+-        label = group.torrent_label
+-        if file_count > 1:
+-            return f"{label}  [{file_count} files]"
+-        return label
++        return group.status
+     if col == 2:
+         return group.aggregate_progress
+     if col == 3:
+-        return format_speed(group.aggregate_speed) if group.aggregate_speed > 0 else ""
++        return format_speed(group.aggregate_speed) if group.aggregate_speed > 0 else "\u2014"
+     if col == 4:
+-        return format_eta(0)
++        return format_speed(group.aggregate_upload_speed) if group.aggregate_upload_speed > 0 else "\u2014"
+     if col == 5:
+-        return group.files[0].seeds if group.files else 0
++        return format_eta(group.aggregate_eta)
+     if col == 6:
+-        return f"{group.aggregate_progress:.0%}"
++        seeds = sum(record.seeds for record in group.files)
++        peers = sum(record.peers for record in group.files)
++        return f"{seeds} ({peers})" if peers else str(seeds)
+     if col == 7:
++        return f"{group.aggregate_ratio:.2f}"
++    if col == 8:
+         return group.status
+     return ""

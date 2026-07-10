@@ -46,6 +46,7 @@ def create_application(argv: list[str]) -> QtWidgets.QApplication:
     app = QtWidgets.QApplication(argv)
     app.setApplicationName("Minerva Can FixDAT")
     app.setApplicationDisplayName("Minerva Can FixDAT")
+    app.setApplicationVersion("0.1.0")
     app.setOrganizationName("MinervaFixDAT")
     app.setStyle("Fusion")
 

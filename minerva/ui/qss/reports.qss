@@ -1,0 +1,18 @@
+/* Reports workspace. */
+QFrame#reportBatchBar {
+    min-height: 46px;
+    max-height: 46px;
+    background: {{token.info_bg}};
+    border: 1px solid {{token.info_border}};
+    border-radius: {{token.radius_md}};
+}
+QLabel#reportBatchLabel {
+    color: {{token.info_fg}};
+    font-weight: 650;
+}
+QTableView#reportEntries { border: none; border-radius: 0; }
+QListView#reportNavigator {
+    border: none;
+    border-radius: 0;
+    background: transparent;
+}

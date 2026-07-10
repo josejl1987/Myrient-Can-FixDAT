@@ -10,7 +10,6 @@ from superqt import QToggleSwitch
 
 from minerva.app.app_state import AppState
 from minerva.app.pages.base import BasePage
-from minerva.app.task_runner import TaskRunner
 from minerva.domain.settings import AccentName, SettingsDraft, ThemeName
 from minerva.ui.density import DENSITY_SETTINGS_KEY, Density
 from minerva.ui.icons import Icons
@@ -18,7 +17,6 @@ from minerva.ui.widgets.content_state import ContentState
 from minerva.ui.widgets.notification_banner import NotificationBanner
 from minerva.ui.widgets.page_header import PageHeader
 from minerva.ui.widgets.path_picker import PathPicker
-from minerva.ui.widgets.status_badge import BadgeKind, StatusBadge
 from minerva.ui.widgets.surface_panel import SurfacePanel
 
 log = logging.getLogger(__name__)
@@ -53,7 +51,7 @@ class SettingsPage(BasePage):
 
         self._category_list = QtWidgets.QListWidget()
         self._category_list.setObjectName("settingsCategories")
-        self._category_list.setFixedWidth(190)
+        self._category_list.setFixedWidth(210)
         icons = {
             "General": Icons.settings(),
             "Downloads": Icons.download(),
@@ -76,7 +74,7 @@ class SettingsPage(BasePage):
 
         body = QtWidgets.QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(14)
+        body.setSpacing(18)
         body.addWidget(self._category_list)
         body.addWidget(self._pages, 1)
         self._restore_btn = QtWidgets.QPushButton(Icons.refresh(), "Restore defaults")
@@ -88,24 +86,32 @@ class SettingsPage(BasePage):
         self._save_btn = QtWidgets.QPushButton(Icons.save(), "Save changes")
         self._save_btn.setObjectName("primaryButton")
         self._save_btn.clicked.connect(self._on_save)
-        footer = QtWidgets.QHBoxLayout()
+        self._settings_footer = QtWidgets.QFrame()
+        self._settings_footer.setObjectName("settingsFooter")
+        footer = QtWidgets.QHBoxLayout(self._settings_footer)
+        footer.setContentsMargins(12, 10, 12, 10)
+        footer.setSpacing(8)
         footer.addWidget(self._restore_btn)
+        self._dirty_label = QtWidgets.QLabel("All changes saved")
+        self._dirty_label.setObjectName("subtleLabel")
+        footer.addWidget(self._dirty_label)
         footer.addStretch(1)
         footer.addWidget(self._cancel_btn)
         footer.addWidget(self._save_btn)
 
-        # Wrap body + footer in a content widget for ContentState
+        # Wrap body + sticky action footer in a content widget.
         content_widget = QtWidgets.QWidget()
         content_layout_outer = QtWidgets.QVBoxLayout(content_widget)
         content_layout_outer.setContentsMargins(0, 0, 0, 0)
+        content_layout_outer.setSpacing(12)
         content_layout_outer.addLayout(body, 1)
-        content_layout_outer.addLayout(footer)
+        content_layout_outer.addWidget(self._settings_footer)
 
         self._state = ContentState()
         self._state.set_content(content_widget)
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
         root.addWidget(self._header)
         root.addWidget(self._state, 1)
 
@@ -118,9 +124,16 @@ class SettingsPage(BasePage):
 
     @staticmethod
     def _scroll_page(card: QtWidgets.QWidget) -> QtWidgets.QScrollArea:
+        card.setObjectName("settingsPageContent")
+        card.setMinimumWidth(680)
+        card.setMaximumWidth(960)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignHCenter
+            | QtCore.Qt.AlignmentFlag.AlignTop
+        )
         scroll.setWidget(card)
         return scroll
 
@@ -368,8 +381,11 @@ class SettingsPage(BasePage):
         self._cancel_btn.setEnabled(dirty)
         self._header.set_subtitle(
             "Configure downloads, indexing, the native libtorrent engine, and application behavior."
-            + ("  ·  Unsaved changes" if dirty else "")
         )
+        self._dirty_label.setText("Unsaved changes" if dirty else "All changes saved")
+        self._dirty_label.setProperty("dirty", dirty)
+        self._dirty_label.style().unpolish(self._dirty_label)
+        self._dirty_label.style().polish(self._dirty_label)
 
     def _validate(self, draft: SettingsDraft) -> list[str]:
         errors: list[str] = []
@@ -407,9 +423,10 @@ class SettingsPage(BasePage):
         for key, value in values.items():
             self._settings.setValue(key, value)
         self._settings.sync()
-        from minerva.logging_config import configure_logging
         import logging
         import logging.handlers
+
+        from minerva.logging_config import configure_logging
 
         # Preserve the current console level so a --verbose/--debug launch
         # isn't silently downgraded when the user changes the file log level.
@@ -522,6 +539,7 @@ class SettingsPage(BasePage):
 
     def _on_open_log_file(self) -> None:
         from PyQt6 import QtGui
+
         from minerva.logging_config import get_log_file_path
 
         log_path = get_log_file_path()

@@ -147,9 +147,9 @@ class LibraryPage(BasePage):
             "Library",
             "Search the indexed collection, refine results, and stage games for download.",
         )
-        self._export_btn = self._header.add_action("Export DAT", Icons.file())
         self._queue_btn = self._header.add_action("Add to queue", Icons.add(), primary=True)
-        self._open_btn = self._header.add_action("Open file", Icons.folder_open())
+        self._export_btn = self._header.add_overflow_action("Export selected as DAT", Icons.file())
+        self._open_btn = self._header.add_overflow_action("Open selected file", Icons.folder_open())
         self._export_btn.clicked.connect(self._export_selected_dat)
         self._queue_btn.clicked.connect(self._queue_selected)
         self._open_btn.clicked.connect(self._open_selected_file)
@@ -317,8 +317,8 @@ class LibraryPage(BasePage):
 
     def _build_root_layout(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
         root.addWidget(self._header)
         root.addWidget(self._toolbar)
         root.addWidget(self._active_filters)

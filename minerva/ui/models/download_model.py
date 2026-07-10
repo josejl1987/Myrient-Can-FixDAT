@@ -1,4 +1,4 @@
-"""Typed records and columns for the Downloads dashboard."""
+"""Typed records and column definitions for the Downloads workspace."""
 
 from __future__ import annotations
 
@@ -51,6 +51,11 @@ def format_speed(bytes_per_sec: float) -> str:
     return f"{value:.1f} {units[index]}" if index else f"{int(value)} {units[index]}"
 
 
+def format_transfer_speed(bytes_per_sec: float) -> str:
+    """Format a table speed, using an em dash for inactive transfers."""
+    return format_speed(bytes_per_sec) if bytes_per_sec > 0 else "\u2014"
+
+
 def format_eta(seconds: float) -> str:
     if seconds <= 0 or seconds >= 8_640_000:
         return "\u2014"
@@ -64,35 +69,40 @@ def format_eta(seconds: float) -> str:
     return f"{secs}s"
 
 
-def _status_icon(record: DownloadRecord) -> str:
-    icons = {
-        DownloadStatus.QUEUED: "fa5s.hourglass-half",
-        DownloadStatus.STARTING: "fa5s.hourglass-half",
-        DownloadStatus.DOWNLOADING: "fa5s.download",
-        DownloadStatus.PAUSED: "fa5s.pause",
-        DownloadStatus.SEEDING: "fa5s.seedling",
-        DownloadStatus.COMPLETED: "fa5s.check",
-        DownloadStatus.FAILED: "fa5s.exclamation-triangle",
-        DownloadStatus.CANCELLED: "fa5s.times",
-    }
-    return icons.get(record.status, "fa5s.question")
+def status_text(status: DownloadStatus) -> str:
+    value = status.value if hasattr(status, "value") else str(status)
+    return value.replace("_", " ").title()
 
 
-def _speed_display(record: DownloadRecord) -> str:
-    if record.status != DownloadStatus.DOWNLOADING:
-        return ""
-    return format_speed(record.speed)
+def _download_speed(record: DownloadRecord) -> float:
+    return record.speed if record.status == DownloadStatus.DOWNLOADING else 0.0
 
 
+def _upload_speed(record: DownloadRecord) -> float:
+    return record.upload_speed if record.status in {
+        DownloadStatus.DOWNLOADING,
+        DownloadStatus.SEEDING,
+    } else 0.0
+
+
+def _seed_display(record: DownloadRecord) -> str:
+    if record.peers > 0:
+        return f"{record.seeds} ({record.peers})"
+    return str(record.seeds)
+
+
+# The order mirrors the production mock: identity first, compact telemetry in
+# the middle, and a single overflow action at the far edge.
 _DOWNLOAD_COLUMNS: list[ColumnSpec[DownloadRecord]] = [
-    ColumnSpec("", lambda r: _status_icon(r)),
-    ColumnSpec("File", lambda r: r.torrent_name or r.filename),
+    ColumnSpec("Name", lambda r: r.filename),
+    ColumnSpec("Status", lambda r: r.status, format_fn=status_text),
     ColumnSpec("Progress", lambda r: r.progress, format_fn=lambda v: f"{v:.0%}"),
-    ColumnSpec("Speed", lambda r: _speed_display(r)),
-    ColumnSpec("ETA", lambda r: format_eta(r.eta_seconds)),
-    ColumnSpec("Seeds", lambda r: r.seeds, format_fn=lambda v: str(v)),
+    ColumnSpec("Down", lambda r: _download_speed(r), format_fn=format_transfer_speed),
+    ColumnSpec("Up", lambda r: _upload_speed(r), format_fn=format_transfer_speed),
+    ColumnSpec("ETA", lambda r: r.eta_seconds, format_fn=format_eta),
+    ColumnSpec("Seeds", lambda r: r, format_fn=_seed_display),
     ColumnSpec("Ratio", lambda r: r.ratio, format_fn=lambda v: f"{v:.2f}"),
-    ColumnSpec("Actions", lambda r: r.status),
+    ColumnSpec("", lambda r: r.status),
 ]
 
 

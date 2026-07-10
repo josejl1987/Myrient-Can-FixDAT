@@ -1,34 +1,41 @@
-/* Loading / empty / error state treatments. */
-
-/* Loading bar inside ContentState */
-QProgressBar#contentStateLoadingBar {
+/* Loading, empty and notification states. */
+QFrame#emptyStateCard {
+    min-width: 430px;
+    max-width: 540px;
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_lg}};
+}
+QLabel#emptyStateIconWell {
+    min-width: 72px;
+    max-width: 72px;
+    min-height: 72px;
+    max-height: 72px;
     background: {{token.surface_raised}};
-    border: none;
-    border-radius: {{token.radius_sm}};
-    text-align: center;
-    font-size: 10px;
-    min-height: 6px;
-    max-height: 6px;
+    border: 1px solid {{token.border}};
+    border-radius: 36px;
 }
-QProgressBar#contentStateLoadingBar::chunk {
-    background: {{token.accent}};
-    border-radius: {{token.radius_sm}};
-}
-
-/* Empty state already uses emptyStateTitle / emptyStateDescription from base.qss. */
-
-/* Error state title and description (reuse emptyState tokens from base.qss). */
 QLabel#emptyStateTitle {
-    font-size: 18px;
-    font-weight: 650;
     color: {{token.text}};
+    font-size: 19px;
+    font-weight: 700;
 }
 QLabel#emptyStateDescription {
     color: {{token.text_muted}};
-    font-size: 12px;
+    font-size: 13px;
+    line-height: 1.4;
 }
-
-/* ── Notification banners ─────────────────────────────────────────── */
+QProgressBar#contentStateLoadingBar {
+    min-height: 5px;
+    max-height: 5px;
+    background: {{token.surface_raised}};
+    border: none;
+    border-radius: 2px;
+}
+QProgressBar#contentStateLoadingBar::chunk {
+    background: {{token.accent}};
+    border-radius: 2px;
+}
 QFrame#notificationBanner_info,
 QFrame#notificationBanner_success,
 QFrame#notificationBanner_warning,
@@ -37,7 +44,7 @@ QFrame#notificationBanner_error {
 }
 QLabel#notificationTitle {
     color: {{token.text}};
-    font-weight: 600;
+    font-weight: 700;
     font-size: 12px;
 }
 QLabel#notificationBody {
@@ -45,26 +52,27 @@ QLabel#notificationBody {
     font-size: 11px;
 }
 QPushButton#notificationClose {
+    min-width: 28px;
+    max-width: 28px;
+    min-height: 28px;
+    max-height: 28px;
     background: transparent;
     border: none;
-    border-radius: {{token.radius_sm}};
-    padding: 2px;
+    padding: 0;
 }
-QPushButton#notificationClose:hover { background: {{token.surface_raised}}; }
+QPushButton#notificationClose:hover { background: {{token.surface_hover}}; }
 QPushButton#notificationAction {
+    min-height: 28px;
     background: transparent;
     border: none;
     color: {{token.accent}};
-    font-weight: 600;
+    font-weight: 650;
     font-size: 11px;
-    padding: 2px 8px;
+    padding: 1px 8px;
 }
-QPushButton#notificationAction:hover { text-decoration: underline; }
-
-/* ── Dialog titles ────────────────────────────────────────────────── */
+QPushButton#notificationAction:hover { color: {{token.focus_ring}}; }
 QLabel#dialogTitle {
-    font-family: "{{token.body_font}}";
     color: {{token.text}};
-    font-size: 18px;
-    font-weight: 600;
+    font-size: 19px;
+    font-weight: 700;
 }

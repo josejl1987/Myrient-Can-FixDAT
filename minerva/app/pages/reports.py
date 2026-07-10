@@ -23,11 +23,12 @@ from minerva.app.pages.base import BasePage
 from minerva.app.task_runner import TaskRunner
 from minerva.domain.reports import (
     FolderImportSummary,
-    QueueResult,
     ReportSummary,
     ReviewEntry,
     is_approved,
 )
+from minerva.parsers.csv_parser import parse_rv_fix_csv
+from minerva.parsers.dat_parser import parse_dat_file
 from minerva.services.report_acquisition import ReportAcquisitionService
 from minerva.ui.icons import Icons
 from minerva.ui.models.delegates import DisplayDelegate, SizeDelegate
@@ -45,9 +46,9 @@ from minerva.ui.widgets.responsive_workspace import ResponsiveWorkspace
 from minerva.ui.widgets.segmented_control import SegmentedControl
 from minerva.ui.widgets.status_badge import BadgeKind
 from minerva.ui.widgets.surface_panel import SurfacePanel
-from minerva.parsers.csv_parser import parse_rv_fix_csv
-from minerva.parsers.dat_parser import parse_dat_file
-from minerva_db import MinervaDB
+from minerva_db import (
+    MinervaDB,  # noqa: F401  # compatibility for test/application monkeypatching
+)
 from minerva_state import MinervaState
 
 log = logging.getLogger(__name__)
@@ -260,14 +261,19 @@ class ReportsPage(BasePage):
         )
         self._import_btn = self._header.add_action("Add report", Icons.add(), primary=True)
         self._import_folder_btn = self._header.add_action("Import folder", Icons.folder_open())
-        self._rematch_btn = self._header.add_action("Match again", Icons.refresh())
-        self._queue_all_btn = self._header.add_action("Queue all ready", Icons.download())
-        self._delete_btn = self._header.add_action("Remove", Icons.trash(), danger=True)
-        # ── Batch actions (multi-select) ───────────────────────────────
-        self._queue_selected_btn = self._header.add_action("Queue selected", Icons.download())
-        self._rematch_selected_btn = self._header.add_action("Match selected", Icons.refresh())
-        self._export_selected_btn = self._header.add_action("Export selected", Icons.file())
-        self._delete_selected_btn = self._header.add_action("Remove selected", Icons.trash(), danger=True)
+
+        # Contextual and batch commands live in one predictable overflow menu.
+        # This keeps the header stable instead of showing a wall of disabled buttons.
+        self._rematch_btn = self._header.add_overflow_action("Match current report", Icons.refresh())
+        self._queue_all_btn = self._header.add_overflow_action("Queue all ready files", Icons.download())
+        self._delete_btn = self._header.add_overflow_action("Remove current report", Icons.trash(), danger=True)
+        self._header.add_overflow_separator()
+        self._queue_selected_btn = self._header.add_overflow_action("Queue selected reports", Icons.download())
+        self._rematch_selected_btn = self._header.add_overflow_action("Match selected reports", Icons.refresh())
+        self._export_selected_btn = self._header.add_overflow_action("Export selected reports", Icons.file())
+        self._delete_selected_btn = self._header.add_overflow_action(
+            "Remove selected reports", Icons.trash(), danger=True,
+        )
         self._rematch_btn.setEnabled(False)
         self._delete_btn.setEnabled(False)
         self._queue_all_btn.setEnabled(False)
@@ -423,8 +429,8 @@ class ReportsPage(BasePage):
         self._state.set_empty(self._empty_state)
 
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
         root.addWidget(self._header)
         root.addWidget(self._state, 1)
 
@@ -657,7 +663,6 @@ class ReportsPage(BasePage):
             for idx in indexes:
                 source = self._entry_proxy.mapToSource(idx)
                 row = self._entry_model._records[source.row()]  # noqa: SLF001
-                current = (row.entry.decision or "pending").lower()
                 new_decision = "reject" if is_approved(row.entry) else "accept"
                 self._on_decision_changed(
                     self._selected_report_id, row.entry.id, new_decision

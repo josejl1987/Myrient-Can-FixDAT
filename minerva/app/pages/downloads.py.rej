@@ -1,0 +1,323 @@
+--- minerva/app/pages/downloads.py
++++ minerva/app/pages/downloads.py
+@@ -11,27 +11,29 @@ try:
+     from shiboken6 import isValid as _shiboken_is_valid
+ except ImportError:
+     _shiboken_is_valid = None
+-from pathlib import Path
+ 
+ from PyQt6 import QtCore, QtGui, QtWidgets
+ 
+ from minerva.app.app_state import AppState
+ from minerva.app.download_controller import DownloadController
++from minerva.app.page_id import PageId
++from minerva.app.pages.base import BasePage
+ from minerva.domain.downloads import (
+     DOWNLOAD_ACTIVE_STATUSES,
+     DOWNLOAD_DEAD_STATUSES,
+-    DOWNLOAD_DONE_STATUSES,
++    DownloadRuntime,
+     DownloadStatus,
+ )
+-from minerva.app.page_id import PageId
+-from minerva.app.pages.base import BasePage
+-from minerva.domain.downloads import DownloadRuntime, DownloadStatus
+ from minerva.ui.icons import Icons
+-from minerva.ui.models.delegates import ActionDelegate, IconDelegate
+-from minerva.ui.models.download_delegates import DownloadProgressDelegate
++from minerva.ui.models.download_delegates import (
++    DownloadMoreDelegate,
++    DownloadNameDelegate,
++    DownloadProgressDelegate,
++    DownloadStatusDelegate,
++)
+ from minerva.ui.models.download_model import (
+-    DownloadRecord,
+     _DOWNLOAD_COLUMNS,
++    DownloadRecord,
+     format_speed,
+ )
+ from minerva.ui.models.torrent_group import TorrentGroupTreeModel
+@@ -43,10 +45,10 @@ from minerva.ui.widgets.download_inspector import DownloadInspector
+ from minerva.ui.widgets.empty_state import EmptyState
+ from minerva.ui.widgets.metric_card import MetricCard, MetricKind
+ from minerva.ui.widgets.metric_strip import MetricStrip
++from minerva.ui.widgets.page_header import PageHeader
+ from minerva.ui.widgets.segmented_control import SegmentedControl
+ from minerva.ui.widgets.speed_chart import SpeedChart
+ from minerva.ui.widgets.surface_panel import SurfacePanel
+-from minerva.ui.widgets.page_header import PageHeader
+ from minerva_db import DEFAULT_INDEX_PATH, MinervaDB
+ 
+ log = logging.getLogger(__name__)
+@@ -189,20 +191,60 @@ class DownloadsPage(BasePage):
+ 
+     def _build_ui(self) -> None:
+         root = QtWidgets.QVBoxLayout(self)
+-        root.setContentsMargins(24, 20, 24, 20)
+-        root.setSpacing(14)
++        root.setContentsMargins(28, 24, 28, 24)
++        root.setSpacing(16)
+ 
+         self._header = PageHeader(
+             "Downloads",
+-            "Manage the active queue, monitor progress, and control native torrent engine tasks.",
++            "Manage active and queued downloads.",
++        )
++        self._transfer_summary = QtWidgets.QLabel("0 B/s  ↓    0 B/s  ↑")
++        self._transfer_summary.setObjectName("downloadTransferSummary")
++        self._header.add_widget(self._transfer_summary)
++        self._pause_all_btn = self._header.add_action(
++            "Pause all", Icons.pause(), primary=True
+         )
+-        self._pause_all_btn = self._header.add_action("Pause all", Icons.pause())
++
++        # Keep the individual actions as real buttons for shortcut/test
++        # compatibility, but expose them through a single overflow menu.
+         self._resume_all_btn = self._header.add_action("Resume all", Icons.play())
+         self._pause_selected_btn = self._header.add_action("Pause selected", Icons.pause())
+         self._resume_selected_btn = self._header.add_action("Resume selected", Icons.play())
+         self._cancel_selected_btn = self._header.add_action(
+             "Remove selected", Icons.trash(), danger=True
+         )
++        for button in (
++            self._resume_all_btn,
++            self._pause_selected_btn,
++            self._resume_selected_btn,
++            self._cancel_selected_btn,
++        ):
++            button.hide()
++
++        self._overflow_btn = QtWidgets.QToolButton()
++        self._overflow_btn.setObjectName("downloadHeaderOverflow")
++        self._overflow_btn.setText("…")
++        self._overflow_btn.setToolTip("More download actions")
++        self._overflow_btn.setPopupMode(
++            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
++        )
++        self._overflow_menu = QtWidgets.QMenu(self._overflow_btn)
++        self._resume_all_action = self._overflow_menu.addAction(
++            Icons.play(), "Resume all"
++        )
++        self._overflow_menu.addSeparator()
++        self._pause_selected_action = self._overflow_menu.addAction(
++            Icons.pause(), "Pause selected"
++        )
++        self._resume_selected_action = self._overflow_menu.addAction(
++            Icons.play(), "Resume selected"
++        )
++        self._overflow_menu.addSeparator()
++        self._remove_selected_action = self._overflow_menu.addAction(
++            Icons.trash(), "Remove selected"
++        )
++        self._overflow_btn.setMenu(self._overflow_menu)
++        self._header.add_widget(self._overflow_btn)
+         root.addWidget(self._header)
+ 
+         # ── KPI strip ──────────────────────────────────────────────────
+@@ -228,7 +270,11 @@ class DownloadsPage(BasePage):
+             self._failed_metric,
+             self._completed_metric,
+         ])
+-        root.addWidget(self._metric_strip)
++        # Keep the metric cards as the backing presentation model, but use a
++        # compact operational status strip instead of four dashboard cards.
++        self._metric_strip.hide()
++        self._status_strip = self._build_status_strip()
++        root.addWidget(self._status_strip)
+ 
+         self._empty_state = EmptyState(
+             icon=Icons.download(),
+@@ -304,24 +400,7 @@ class DownloadsPage(BasePage):
+         self._queue_panel = SurfacePanel("Download Queue")
+         self._queue_panel.body_layout.setSpacing(0)
+ 
+-        # Connection status
+-        connection_row = QtWidgets.QFrame()
+-        connection_row.setObjectName("downloadConnectionBanner")
+-        connection_row.setProperty("connected", True)
+-        connection_layout = QtWidgets.QHBoxLayout(connection_row)
+-        connection_layout.setContentsMargins(12, 8, 12, 8)
+-        connection_layout.setSpacing(8)
+-        self._connection_dot = QtWidgets.QLabel("\u25cf")
+-        self._connection_dot.setObjectName("downloadConnectionDot")
+-        self._connection_dot.setProperty("connected", True)
+-        connection_layout.addWidget(self._connection_dot)
+-        self._torrent_engine_status = QtWidgets.QLabel("Native libtorrent session active")
+-        self._torrent_engine_status.setObjectName("downloadConnectionText")
+-        connection_layout.addWidget(self._torrent_engine_status)
+-        connection_layout.addStretch(1)
+-        self._queue_panel.body_layout.addWidget(connection_row)
+-
+-        # Toolbar: search + status tabs
++        # Toolbar: restrained search + count-bearing status filters
+         toolbar = QtWidgets.QFrame()
+         toolbar.setObjectName("downloadToolbar")
+         toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
+@@ -359,76 +442,68 @@ class DownloadsPage(BasePage):
+         self._view.setEditTriggers(
+             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+         )
+-        self._view.setAlternatingRowColors(True)
+-        self._view.setSortingEnabled(False)  # tree sorting not supported by proxy
++        self._view.setAlternatingRowColors(False)
++        self._view.setSortingEnabled(False)
+         self._view.setRootIsDecorated(True)
+-        self._view.setUniformRowHeights(True)
++        self._view.setUniformRowHeights(False)
+         self._view.setAnimated(False)
+-        self._view.setIndentation(16)
++        self._view.setIndentation(14)
+         self._view.setAllColumnsShowFocus(True)
+         self._view.setExpandsOnDoubleClick(True)
+         self._view.setItemsExpandable(True)
+-        self._view.collapseAll()
++        self._view.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
++
+         header = self._view.header()
+-        header.setMinimumSectionSize(24)
+-        header.setDefaultSectionSize(34)
++        header.setMinimumSectionSize(28)
++        header.setDefaultSectionSize(38)
+         header.setStretchLastSection(False)
+         for col in range(len(_DOWNLOAD_COLUMNS)):
+             header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
+-        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
++        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+         column_widths = {
+-            0: 32,   # status icon
++            1: 118,  # status
+             2: 96,   # progress
+-            3: 86,   # speed
+-            4: 68,   # ETA
+-            5: 52,   # seeds
+-            6: 56,   # ratio
+-            7: 72,   # actions
++            3: 84,   # down
++            4: 78,   # up
++            5: 62,   # ETA
++            6: 72,   # seeds
++            7: 58,   # ratio
++            8: 38,   # overflow
+         }
+         for col, width in column_widths.items():
+             header.resizeSection(col, width)
+ 
+-        # Delegates for icon, progress, and action columns
+-        self._view.setItemDelegateForColumn(0, IconDelegate(self._view))
++        self._name_delegate = DownloadNameDelegate(self._view)
++        self._status_delegate = DownloadStatusDelegate(self._view)
+         self._progress_delegate = DownloadProgressDelegate(parent=self._view)
++        self._more_delegate = DownloadMoreDelegate(self._view)
++        self._view.setItemDelegateForColumn(0, self._name_delegate)
++        self._view.setItemDelegateForColumn(1, self._status_delegate)
+         self._view.setItemDelegateForColumn(2, self._progress_delegate)
+-        self._action_delegate = ActionDelegate(self._view)
+-        self._view.setItemDelegateForColumn(7, self._action_delegate)
+-        self._action_delegate.action_triggered.connect(self._on_action)
+-        self._bottom_tabs = QtWidgets.QTabWidget()
+-        self._bottom_tabs.setObjectName("downloadBottomTabs")
+-        self._bottom_tabs.setFixedHeight(120)
+-        self._bottom_tabs.setVisible(False)
+-        self._bottom_tabs.tabBar().setObjectName("bottomTabBar")
+-
++        self._view.setItemDelegateForColumn(8, self._more_delegate)
++        self._more_delegate.menu_requested.connect(self._show_row_menu)
++        # Compatibility alias for code that still expects an action delegate.
++        self._action_delegate = self._more_delegate
++
++        # The mock treats telemetry as part of the workspace, not as a cramped
++        # tab hidden below a mostly-empty table.  Activity remains available to
++        # the controller for logging, but is not permanently occupying space.
+         self._speed_chart = SpeedChart()
+-        self._bottom_tabs.addTab(self._speed_chart, "Throughput")
+-
+-        activity_tab = QtWidgets.QWidget()
+-        activity_tab_layout = QtWidgets.QVBoxLayout(activity_tab)
+-        activity_tab_layout.setContentsMargins(0, 0, 0, 0)
+-        activity_tab_layout.setSpacing(0)
+-        activity_header_row = QtWidgets.QHBoxLayout()
+-        activity_title = QtWidgets.QLabel("Recent activity")
+-        activity_title.setObjectName("panelTitle")
+-        activity_header_row.addWidget(activity_title)
+-        activity_header_row.addStretch(1)
+         self._activity_list = ActivityList(max_items=50)
++        self._activity_list.hide()
+         self._clear_activity_btn = QtWidgets.QPushButton("Clear")
+-        self._clear_activity_btn.setObjectName("linkButton")
++        self._clear_activity_btn.hide()
+         self._clear_activity_btn.clicked.connect(self._activity_list.clear)
+-        activity_header_row.addWidget(self._clear_activity_btn)
+-        activity_tab_layout.addLayout(activity_header_row)
+-        activity_tab_layout.addWidget(self._activity_list)
+-        self._bottom_tabs.addTab(activity_tab, "Activity")
++        self._bottom_tabs = QtWidgets.QTabWidget()
++        self._bottom_tabs.hide()
+ 
+-        # Workspace: table stacked above bottom chart
+         workspace = QtWidgets.QWidget()
++        workspace.setObjectName("downloadQueueWorkspace")
+         workspace_layout = QtWidgets.QVBoxLayout(workspace)
+         workspace_layout.setContentsMargins(0, 0, 0, 0)
+-        workspace_layout.setSpacing(0)
++        workspace_layout.setSpacing(12)
+         workspace_layout.addWidget(self._view, 1)
+-        workspace_layout.addWidget(self._bottom_tabs)
++        workspace_layout.addWidget(self._speed_chart, 0)
+ 
+         # Inspector
+         self._inspector = DownloadInspector()
+@@ -440,12 +515,15 @@ class DownloadsPage(BasePage):
+ 
+         # Plain splitter: queue table (left) + inspector (right)
+         self._main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+-        self._main_splitter.setChildrenCollapsible(False)
++        self._main_splitter.setObjectName("downloadWorkspaceSplitter")
++        self._main_splitter.setChildrenCollapsible(True)
++        self._main_splitter.setHandleWidth(1)
+         self._main_splitter.addWidget(workspace)
+         self._main_splitter.addWidget(self._inspector)
+         self._main_splitter.setStretchFactor(0, 1)
+         self._main_splitter.setStretchFactor(1, 0)
+-        self._main_splitter.setSizes([1100, 320])
++        self._main_splitter.setSizes([1100, 0])
++        self._inspector.setVisible(False)
+         self._queue_panel.body_layout.addWidget(self._main_splitter, 1)
+ 
+         # Summary bar
+@@ -463,11 +541,14 @@ class DownloadsPage(BasePage):
+         summary_layout.addStretch(1)
+         self._selected_label = QtWidgets.QLabel("0 selected")
+         self._selected_label.setObjectName("downloadSummaryText")
++        self._selected_label.hide()
+         summary_layout.addWidget(self._selected_label)
+         self._speed_label = QtWidgets.QLabel("0 B/s down")
+         self._speed_label.setObjectName("downloadSummarySpeed")
++        self._speed_label.hide()
+         summary_layout.addWidget(self._speed_label)
+         self._queue_panel.body_layout.addWidget(self._summary)
++        self._summary.hide()
+ 
+         layout.addWidget(self._queue_panel, 1)
+         return widget
+@@ -903,6 +1045,11 @@ class DownloadsPage(BasePage):
+         # click.
+         self._sync_inspector_if_changed()
+         selected = self._selected_records()
++        has_selection = bool(selected)
++        self._inspector.setVisible(has_selection)
++        if has_selection and self._main_splitter.sizes()[1] < 260:
++            total = max(sum(self._main_splitter.sizes()), 900)
++            self._main_splitter.setSizes([max(total - 360, 540), 360])
+         self._selected_label.setText(
+             f"{len(selected)} selected"
+         )
+@@ -1314,7 +1482,7 @@ class DownloadsPage(BasePage):
+             self._user_set_filter = True
+         if hasattr(self, "_main_splitter"):
+             value = self._settings.value("downloads/workspace_splitter")
+-            if isinstance(value, list) and value:
++            if isinstance(value, list) and value and self._inspector.isVisible():
+                 self._main_splitter.setSizes([int(part) for part in value])
+         tab_index = self._settings.value("downloads/bottom_tab", 0, int)
+         if hasattr(self, "_bottom_tabs"):

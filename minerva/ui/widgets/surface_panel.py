@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtGui, QtWidgets
 
 from minerva.ui.widgets.panel_header import PanelHeader
 
@@ -39,8 +39,8 @@ class SurfacePanel(QtWidgets.QFrame):
 
         body = QtWidgets.QWidget()
         self.body_layout = QtWidgets.QVBoxLayout(body)
-        self.body_layout.setContentsMargins(12, 8, 12, 12)
-        self.body_layout.setSpacing(8)
+        self.body_layout.setContentsMargins(16, 12, 16, 16)
+        self.body_layout.setSpacing(10)
         root.addWidget(body, 1)
 
         # Expose header actions for caller convenience

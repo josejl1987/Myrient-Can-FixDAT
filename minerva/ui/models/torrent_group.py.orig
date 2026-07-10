@@ -1,0 +1,468 @@
+"""Torrent-grouped and report/platform-grouped view models for the Downloads page."""
+
+from __future__ import annotations
+
+import enum
+from dataclasses import dataclass, field
+from typing import ClassVar
+
+from PyQt6 import QtCore
+
+from minerva.domain.downloads import DownloadStatus
+from minerva.ui.models.download_model import (
+    DownloadRecord,
+    _status_icon,
+    format_eta,
+    format_speed,
+)
+
+# ── Custom data roles for group/record rendering ────────────────────────
+# Qt.ItemDataRole.UserRole is 0x0100 (256); we offset from there.
+IS_GROUP_ROLE: int = QtCore.Qt.ItemDataRole.UserRole + 1
+SUBTITLE_ROLE: int = QtCore.Qt.ItemDataRole.UserRole + 2
+RECORD_ROLE: int = QtCore.Qt.ItemDataRole.UserRole + 3
+STATUS_ROLE: int = QtCore.Qt.ItemDataRole.UserRole + 4
+GROUP_ROLE: int = QtCore.Qt.ItemDataRole.UserRole + 5
+
+
+@dataclass
+class TorrentGroup:
+    """Aggregate view of one torrent and its selected files.
+
+    Created by grouping ``DownloadRecord`` entries by ``torrent_hash``
+    (or ``torrent_name`` for unsubmitted torrents).  Computed properties
+    summarise the group for the card header.
+    """
+
+    key: str
+    torrent_name: str
+    torrent_hash: str | None
+    files: list[DownloadRecord]
+
+    # ── Status priority (worst-case wins) ──────────────────────────────
+    _STATUS_PRIORITY: ClassVar[dict[DownloadStatus, int]] = {
+        DownloadStatus.FAILED: 0,
+        DownloadStatus.DOWNLOADING: 1,
+        DownloadStatus.STARTING: 2,
+        DownloadStatus.SEEDING: 3,
+        DownloadStatus.PAUSED: 4,
+        DownloadStatus.QUEUED: 5,
+        DownloadStatus.COMPLETED: 6,
+        DownloadStatus.CANCELLED: 7,
+    }
+
+    @property
+    def aggregate_progress(self) -> float:
+        if not self.files:
+            return 0.0
+        return sum(f.progress for f in self.files) / len(self.files)
+
+    @property
+    def aggregate_speed(self) -> float:
+        return sum(f.speed for f in self.files)
+
+    @property
+    def aggregate_upload_speed(self) -> float:
+        return sum(f.upload_speed for f in self.files)
+
+    @property
+    def aggregate_eta(self) -> float:
+        """Worst-case ETA across downloading files (0 if none active)."""
+        active = [f for f in self.files if f.eta_seconds > 0]
+        if not active:
+            return 0.0
+        return max(f.eta_seconds for f in active)
+
+    @property
+    def aggregate_ratio(self) -> float:
+        """Average ratio across files that have a non-zero ratio."""
+        with_ratio = [f for f in self.files if f.ratio > 0]
+        if not with_ratio:
+            return 0.0
+        return sum(f.ratio for f in with_ratio) / len(with_ratio)
+
+    @property
+    def completed_count(self) -> int:
+        return sum(1 for f in self.files if f.status == DownloadStatus.COMPLETED)
+
+    @property
+    def subtitle(self) -> str:
+        """Compact subtitle for the group row (e.g. ``3/5 files · 1.2 GB/s``)."""
+        parts: list[str] = []
+        if self.file_count > 1:
+            parts.append(f"{self.completed_count}/{self.file_count} files")
+        speed = self.aggregate_speed
+        if speed > 0:
+            parts.append(format_speed(speed))
+        return "  \u00b7  ".join(parts)
+
+    @property
+    def status(self) -> DownloadStatus:
+        if not self.files:
+            return DownloadStatus.QUEUED
+        return min(
+            self.files,
+            key=lambda f: self._STATUS_PRIORITY.get(f.status, 99),
+        ).status
+
+    @property
+    def file_count(self) -> int:
+        return len(self.files)
+
+    @property
+    def collection(self) -> str:
+        return self.files[0].collection if self.files else ""
+
+    @property
+    def system(self) -> str:
+        return self.files[0].system if self.files else ""
+
+    @property
+    def torrent_label(self) -> str:
+        """Human-readable label for the card header."""
+        if self.collection and self.system:
+            return f"{self.collection} \u2014 {self.system}"
+        name = self.torrent_name or "Unnamed torrent"
+        # Truncate raw hex hashes (32-char MD5 / 40-char SHA1) for readability.
+        if len(name) in (32, 40) and all(c in "0123456789abcdef" for c in name):
+            return f"{name[:8]}..."
+        return name
+
+
+def group_records(records: list[DownloadRecord]) -> list[TorrentGroup]:
+    """Group records by ``torrent_hash`` (preferred) or ``torrent_name``."""
+    buckets: dict[str, list[DownloadRecord]] = {}
+    for record in records:
+        key = record.torrent_hash or record.torrent_name or record.filename or str(record.id)
+        buckets.setdefault(key, []).append(record)
+
+    return [
+        TorrentGroup(
+            key=key,
+            torrent_name=records[0].torrent_name or key,
+            torrent_hash=records[0].torrent_hash,
+            files=records,
+        )
+        for key, records in buckets.items()
+    ]
+
+
+class GroupMode(enum.Enum):
+    """Top-level grouping strategy for the Downloads page."""
+
+    TORRENT = "torrent"
+    REPORT = "report"
+    PLATFORM = "platform"
+
+
+@dataclass
+class GroupedDownloads:
+    """Top-level section containing a list of torrent groups.
+
+    A section corresponds to a report, a platform (system), or a single
+    torrent when the user chooses the ``TORRENT`` grouping mode.
+    """
+
+    key: str
+    label: str
+    sublabel: str = ""
+    groups: list[TorrentGroup] = field(default_factory=list)
+
+    _STATUS_PRIORITY: ClassVar[dict[DownloadStatus, int]] = {s: i for i, s in enumerate([
+        DownloadStatus.FAILED,
+        DownloadStatus.DOWNLOADING,
+        DownloadStatus.STARTING,
+        DownloadStatus.SEEDING,
+        DownloadStatus.PAUSED,
+        DownloadStatus.QUEUED,
+        DownloadStatus.COMPLETED,
+        DownloadStatus.CANCELLED,
+    ])}
+
+    @property
+    def aggregate_progress(self) -> float:
+        if not self.groups:
+            return 0.0
+        return sum(g.aggregate_progress * g.file_count for g in self.groups) / sum(g.file_count for g in self.groups)
+
+    @property
+    def aggregate_speed(self) -> float:
+        return sum(g.aggregate_speed for g in self.groups)
+
+    @property
+    def status(self) -> DownloadStatus:
+        if not self.groups:
+            return DownloadStatus.QUEUED
+        return min(self.groups, key=lambda g: self._STATUS_PRIORITY.get(g.status, 99)).status
+
+    @property
+    def file_count(self) -> int:
+        return sum(g.file_count for g in self.groups)
+
+    @property
+    def collection(self) -> str:
+        return self.groups[0].collection if self.groups else ""
+
+    @property
+    def system(self) -> str:
+        return self.groups[0].system if self.groups else ""
+
+
+def group_records_by_mode(
+    records: list[DownloadRecord],
+    mode: GroupMode,
+) -> list[GroupedDownloads]:
+    """Group records by *mode* (torrent, report, or platform).
+
+    Within each top-level section records are still split into
+    :class:`TorrentGroup` buckets.
+    """
+    torrent_groups = group_records(records)
+
+    if mode == GroupMode.TORRENT:
+        return [
+            GroupedDownloads(
+                key=g.key,
+                label=g.torrent_label,
+                sublabel="",
+                groups=[g],
+            )
+            for g in torrent_groups
+        ]
+
+    buckets: dict[str, GroupedDownloads] = {}
+    for g in torrent_groups:
+        if mode == GroupMode.REPORT:
+            key = g.files[0].report_id or "__no_report__"
+            label = g.files[0].report_name or "Unknown report"
+        else:  # GroupMode.PLATFORM
+            key = g.files[0].system or "__no_platform__"
+            label = g.files[0].system or "Unknown platform"
+
+        if key in buckets:
+            buckets[key].groups.append(g)
+        else:
+            buckets[key] = GroupedDownloads(key=key, label=label, groups=[g])
+
+    return list(buckets.values())
+
+
+# ── Tree model for QTreeView ─────────────────────────────────────────────
+
+
+class TorrentGroupTreeModel(QtCore.QAbstractItemModel):
+    """Tree model grouping DownloadRecords by torrent for QTreeView."""
+
+    def __init__(
+        self,
+        groups: list[TorrentGroup] | None = None,
+        columns: list | None = None,
+        parent: QtCore.QObject | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._columns: list = columns or []
+        self._groups: list[TorrentGroup] = groups or []
+        self._records_by_qid: dict[str, DownloadRecord] = {
+            rec.queue_id: rec
+            for group in self._groups
+            for rec in group.files
+            if rec.queue_id
+        }
+
+    def _rebuild_index(self) -> None:
+        self._records_by_qid = {
+            rec.queue_id: rec
+            for group in self._groups
+            for rec in group.files
+            if rec.queue_id
+        }
+    # ── Public API ───────────────────────────────────────────────────────
+
+    def set_groups(self, groups: list[TorrentGroup]) -> None:
+        self.beginResetModel()
+        self._groups = groups
+        self._rebuild_index()
+        self.endResetModel()
+
+    def group_at(self, group_row: int) -> TorrentGroup | None:
+        if 0 <= group_row < len(self._groups):
+            return self._groups[group_row]
+        return None
+
+    def file_at(self, group_row: int, child_row: int) -> DownloadRecord | None:
+        """Look up a file by its group+child position."""
+        group = self.group_at(group_row)
+        if group is not None and 0 <= child_row < len(group.files):
+            return group.files[child_row]
+        return None
+
+    def record_at(self, row: int) -> DownloadRecord | None:
+        """Flat backward-compat: return the *row*-th record across all groups."""
+        return self.flat_record_at(row)
+
+    def record_count(self) -> int:
+        """Total records across all groups (flat count)."""
+        return sum(g.file_count for g in self._groups)
+
+    def flat_record_at(self, idx: int) -> DownloadRecord | None:
+        """Return the *idx*-th record in flat order (groups concatenated)."""
+        for group in self._groups:
+            if idx < len(group.files):
+                return group.files[idx]
+            idx -= len(group.files)
+        return None
+
+    def flat_index_of(self, queue_id: str) -> tuple[int, int] | None:
+        """Find (group_row, child_row) for a record by queue_id."""
+        for grp_row, group in enumerate(self._groups):
+            for child_row, rec in enumerate(group.files):
+                if rec.queue_id == queue_id:
+                    return (grp_row, child_row)
+        return None
+
+    def flat_index(self, group_row: int, child_row: int, column: int = 0) -> QtCore.QModelIndex:
+        """Build a tree index for dataChanged emission."""
+        if child_row < 0:
+            return self.createIndex(group_row, column, 0)
+        return self.createIndex(child_row, column, group_row + 1)
+
+    def set_records(self, records: list[DownloadRecord]) -> None:
+        self.set_groups(group_records(records))
+
+    # ── QAbstractItemModel interface ─────────────────────────────────────
+    #
+    # Internal-ID convention:
+    #   group rows  → internalId = 0  (root level)
+    #   file rows   → internalId = group_row + 1  (offset so 0 never = group)
+
+    def index(self, row: int, column: int, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> QtCore.QModelIndex:  # noqa: N802
+        if not self.hasIndex(row, column, parent):
+            return QtCore.QModelIndex()
+        if not parent.isValid():
+            return self.createIndex(row, column, 0)
+        return self.createIndex(row, column, parent.row() + 1)
+
+    def parent(self, index: QtCore.QModelIndex) -> QtCore.QModelIndex:  # noqa: N802
+        if not index.isValid():
+            return QtCore.QModelIndex()
+        parent_id = index.internalId()
+        if parent_id == 0:
+            return QtCore.QModelIndex()
+        return self.createIndex(parent_id - 1, 0, 0)
+
+    def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
+        if not parent.isValid():
+            return len(self._groups)
+        parent_id = parent.internalId()
+        if parent_id == 0:
+            # Group index — return file count
+            if 0 <= parent.row() < len(self._groups):
+                return len(self._groups[parent.row()].files)
+        # File indices have no children
+        return 0
+
+    def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # noqa: N802
+        return len(self._columns)
+
+    def headerData(self, section: int, orientation: QtCore.Qt.Orientation, role: int = QtCore.Qt.ItemDataRole.DisplayRole) -> str | None:  # noqa: N802
+        if orientation == QtCore.Qt.Orientation.Horizontal and role == QtCore.Qt.ItemDataRole.DisplayRole:
+            if 0 <= section < len(self._columns):
+                return self._columns[section].header
+        return None
+
+    def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlags:  # noqa: N802
+        if not index.isValid():
+            return QtCore.Qt.ItemFlag.NoItemFlags
+        return QtCore.Qt.ItemFlag.ItemIsEnabled | QtCore.Qt.ItemFlag.ItemIsSelectable
+
+    def data(self, index: QtCore.QModelIndex, role: int = QtCore.Qt.ItemDataRole.DisplayRole) -> object:  # noqa: N802
+        if not index.isValid():
+            return None
+        col = index.column()
+        if col < 0 or col >= len(self._columns):
+            return None
+        spec = self._columns[col]
+        is_group = index.internalId() == 0
+
+        # ── Custom roles (work for both group and file rows) ──
+        if role == IS_GROUP_ROLE:
+            return is_group
+        if role == STATUS_ROLE:
+            if is_group:
+                group = self.group_at(index.row())
+                return group.status if group else None
+            rec = self.file_at(index.internalId() - 1, index.row())
+            return rec.status if rec else None
+        if role == GROUP_ROLE:
+            group = self.group_at(index.row()) if is_group else self.group_at(index.internalId() - 1)
+            return group
+        if role == RECORD_ROLE:
+            if is_group:
+                return None
+            return self.file_at(index.internalId() - 1, index.row())
+        if role == SUBTITLE_ROLE:
+            if is_group:
+                group = self.group_at(index.row())
+                return group.subtitle if group else ""
+            rec = self.file_at(index.internalId() - 1, index.row())
+            return _record_subtitle(rec) if rec else ""
+
+        # ── Standard roles ──
+        if is_group:
+            group = self.group_at(index.row())
+            if group is None:
+                return None
+            raw = _group_column_value(col, group)
+        else:
+            group_row = index.internalId() - 1
+            rec = self.file_at(group_row, index.row())
+            if rec is None:
+                return None
+            if col == 1:
+                raw = rec.filename
+            else:
+                raw = spec.accessor(rec)
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            if spec.format_fn is not None and not is_group:
+                return spec.format_fn(raw)
+            return raw
+        if role == QtCore.Qt.ItemDataRole.UserRole:
+            return raw
+        if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+            return str(raw) if raw is not None else ""
+        return None
+
+
+def _group_column_value(col: int, group: TorrentGroup) -> object:
+    """Aggregate display value for a group row at *col* (0–8)."""
+    if col == 0:
+        return _status_icon(group.files[0]) if group.files else "fa5s.question"
+    if col == 1:
+        return group.torrent_label
+    if col == 2:
+        return group.aggregate_progress
+    if col == 3:
+        return format_speed(group.aggregate_speed) if group.aggregate_speed > 0 else ""
+    if col == 4:
+        return format_eta(group.aggregate_eta)
+    if col == 5:
+        return max((f.seeds for f in group.files), default=0)
+    if col == 6:
+        return f"{group.aggregate_ratio:.2f}"
+    if col == 7:
+        return f"{group.aggregate_progress:.0%}"
+    if col == 8:
+        return group.status
+    return ""
+
+
+def _record_subtitle(rec: DownloadRecord) -> str:
+    """Compact subtitle for a file (leaf) row."""
+    parts: list[str] = []
+    if rec.status == DownloadStatus.DOWNLOADING and rec.speed > 0:
+        parts.append(format_speed(rec.speed))
+    if rec.eta_seconds > 0:
+        parts.append(format_eta(rec.eta_seconds))
+    if rec.ratio > 0:
+        parts.append(f"ratio {rec.ratio:.2f}")
+    return "  \u00b7  ".join(parts) if parts else ""

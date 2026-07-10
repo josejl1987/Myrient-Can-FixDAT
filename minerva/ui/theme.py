@@ -1,4 +1,9 @@
-"""Semantic theme tokens and stylesheet builder for Minerva."""
+"""Semantic theme tokens and stylesheet builder for Minerva.
+
+The UI is intentionally driven by a small semantic palette rather than page-
+specific colours.  Page widgets should consume these tokens through QSS and
+avoid hard-coded RGB values so accent changes remain coherent application-wide.
+"""
 
 from __future__ import annotations
 
@@ -11,116 +16,92 @@ from minerva.ui.qss.loader import load_qss
 @dataclass(frozen=True)
 class ThemeTokens:
     # Core surfaces
-    background: str = "#0B1220"
-    surface: str = "#111827"
-    surface_raised: str = "#1B2638"
-    border: str = "#263244"
-    text: str = "#E5E7EB"
-    text_muted: str = "#8B98AA"
-    disabled_text: str = "#475569"
-    scrollbar: str = "#334155"
+    background: str = "#070C14"
+    surface: str = "#0D1522"
+    surface_raised: str = "#152033"
+    surface_hover: str = "#1B2940"
+    surface_sunken: str = "#09111D"
+    sidebar: str = "#09111D"
+    border: str = "#223049"
+    border_strong: str = "#31435F"
+    text: str = "#F3F6FB"
+    text_muted: str = "#9AA8BC"
+    text_subtle: str = "#65758C"
+    disabled_text: str = "#526077"
+    scrollbar: str = "#34445E"
 
-    # Fonts
-    heading_font: str = "Russo One"
-    body_font: str = "Chakra Petch"
+    # Fonts. Segoe UI is native on the primary Windows target and Qt falls
+    # back to the platform sans-serif on other systems.
+    heading_font: str = "Segoe UI"
+    body_font: str = "Segoe UI"
 
     # Shape tokens
-    radius_sm: str = "4px"
-    radius_md: str = "8px"
-    radius_lg: str = "12px"
+    radius_sm: str = "6px"
+    radius_md: str = "10px"
+    radius_lg: str = "14px"
+
+    # Interactive accent
+    accent: str = "#3B82F6"
+    accent_hover: str = "#2563EB"
+    accent_pressed: str = "#1D4ED8"
+    focus_ring: str = "#60A5FA"
 
     # Semantic accents
-    accent: str = "#22C55E"
-    accent_hover: str = "#16A34A"
-    success: str = "#22C55E"
-    warning: str = "#F0AD4E"
-    error: str = "#EF4444"
-    purple: str = "#A855F7"
+    success: str = "#34D399"
+    warning: str = "#FBBF24"
+    error: str = "#FB7185"
+    purple: str = "#C084FC"
 
-    # Semantic surfaces (pill backgrounds)
-    success_surface: str = "#0D2818"
-    success_border: str = "#1A4D2E"
-    warning_surface: str = "#2D2410"
-    warning_border: str = "#5C4819"
-    error_surface: str = "#2D1014"
-    error_border: str = "#5C1F29"
-    info_surface: str = "#0D2840"
-    info_border: str = "#1A4D6E"
-    purple_surface: str = "#1F1430"
-    purple_border: str = "#4A2D6E"
+    # Semantic surfaces
+    success_surface: str = "#0B2923"
+    success_border: str = "#1C5B4D"
+    warning_surface: str = "#2C220B"
+    warning_border: str = "#66501A"
+    error_surface: str = "#30131B"
+    error_border: str = "#6C2939"
+    info_surface: str = "#0B2342"
+    info_border: str = "#214D82"
+    purple_surface: str = "#251538"
+    purple_border: str = "#553078"
 
-    # Semantic surface aliases (fg/bg/border naming) — required by
-    # StatusBadge, MetricCard, Banner, Pill semantics.
-    success_fg: str = "#22C55E"
-    success_bg: str = "#0D2818"
-    warning_fg: str = "#F0AD4E"
-    warning_bg: str = "#2D2410"
-    error_fg: str = "#EF4444"
-    error_bg: str = "#2D1014"
-    info_fg: str = "#3B82F6"
-    info_bg: str = "#0D2840"
-    purple_fg: str = "#A855F7"
-    purple_bg: str = "#1F1430"
+    # Semantic aliases used by badges, banners and delegates.
+    success_fg: str = "#34D399"
+    success_bg: str = "#0B2923"
+    warning_fg: str = "#FBBF24"
+    warning_bg: str = "#2C220B"
+    error_fg: str = "#FB7185"
+    error_bg: str = "#30131B"
+    info_fg: str = "#60A5FA"
+    info_bg: str = "#0B2342"
+    purple_fg: str = "#C084FC"
+    purple_bg: str = "#251538"
 
     @classmethod
     def for_accent(cls, name: str) -> "ThemeTokens":
-        """Return a copy with a different interactive accent colour.
+        """Return a token set with a different interactive accent colour.
 
-        Only ``accent`` and ``accent_hover`` change.  Semantic colours
-        (``success``, ``warning``, ``error``, ``info_fg``, ``purple``) are
-        intentionally fixed regardless of the chosen accent — green always
-        means success, blue always means info, etc.  This follows universal
-        colour conventions so users never have to learn a custom mapping.
+        Semantic colours remain fixed: green is success, amber is warning,
+        red is destructive, and blue is informational regardless of the
+        chosen interactive accent.
         """
         accents = {
-            "blue": "#3B82F6",
-            "purple": "#A855F7",
-            "green": "#22C55E",
+            "blue": ("#3B82F6", "#2563EB", "#1D4ED8", "#60A5FA"),
+            "purple": ("#A855F7", "#9333EA", "#7E22CE", "#C084FC"),
+            "green": ("#22C55E", "#16A34A", "#15803D", "#4ADE80"),
         }
-        return cls(accent=accents.get(name, accents["green"]))
+        accent, hover, pressed, focus = accents.get(name, accents["blue"])
+        return cls(
+            accent=accent,
+            accent_hover=hover,
+            accent_pressed=pressed,
+            focus_ring=focus,
+        )
 
     def to_dict(self) -> dict[str, str]:
+        """Return every dataclass field for QSS token substitution."""
         return {
-            "background": self.background,
-            "surface": self.surface,
-            "surface_raised": self.surface_raised,
-            "border": self.border,
-            "text": self.text,
-            "text_muted": self.text_muted,
-            "disabled_text": self.disabled_text,
-            "scrollbar": self.scrollbar,
-            "heading_font": self.heading_font,
-            "body_font": self.body_font,
-            "radius_sm": self.radius_sm,
-            "radius_md": self.radius_md,
-            "radius_lg": self.radius_lg,
-            "accent": self.accent,
-            "accent_hover": self.accent_hover,
-            "success": self.success,
-            "warning": self.warning,
-            "error": self.error,
-            "purple": self.purple,
-            "success_surface": self.success_surface,
-            "success_border": self.success_border,
-            "warning_surface": self.warning_surface,
-            "warning_border": self.warning_border,
-            "error_surface": self.error_surface,
-            "error_border": self.error_border,
-            "info_surface": self.info_surface,
-            "info_border": self.info_border,
-            "purple_surface": self.purple_surface,
-            "purple_border": self.purple_border,
-            # New semantic aliases
-            "success_fg": self.success_fg,
-            "success_bg": self.success_bg,
-            "warning_fg": self.warning_fg,
-            "warning_bg": self.warning_bg,
-            "error_fg": self.error_fg,
-            "error_bg": self.error_bg,
-            "info_fg": self.info_fg,
-            "info_bg": self.info_bg,
-            "purple_fg": self.purple_fg,
-            "purple_bg": self.purple_bg,
+            name: getattr(self, name)
+            for name in self.__dataclass_fields__
         }
 
 
@@ -141,15 +122,23 @@ def build_stylesheet(tokens: ThemeTokens, density: Density) -> str:
         "page_spacing": density.page_spacing,
     }.items():
         qss = qss.replace(f"{{{{density.{name}}}}}", str(value))
+
+    import logging
     import re
+
     unresolved = re.findall(r"\{\{token\.\w+\}\}", qss)
     if unresolved:
-        import logging
         logging.getLogger(__name__).warning(
             "Unresolved QSS token placeholders: %s", ", ".join(set(unresolved))
         )
     return qss
 
 
-def apply_theme(qapp, tokens: ThemeTokens | None = None, density: Density | None = None) -> None:
-    qapp.setStyleSheet(build_stylesheet(tokens or ThemeTokens(), density or Density.COMPACT))
+def apply_theme(
+    qapp,
+    tokens: ThemeTokens | None = None,
+    density: Density | None = None,
+) -> None:
+    qapp.setStyleSheet(
+        build_stylesheet(tokens or ThemeTokens(), density or Density.COMPACT)
+    )

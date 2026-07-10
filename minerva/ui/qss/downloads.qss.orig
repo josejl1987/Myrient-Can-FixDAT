@@ -5,85 +5,19 @@ QWidget#downloadsPage {
 }
 
 
-/* ── Page header ──────────────────────────────────────────────── */
-
-QLabel#pageEyebrow {
-    color: {{token.text_muted}};
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1.2px;
-}
-
-/* Overflow QToolButton in the header action strip */
-QToolButton#headerOverflowButton {
-    background: transparent;
-    border: 1px solid {{token.border}};
-    border-radius: {{token.radius_md}};
-    color: {{token.text_muted}};
-    padding: 4px 10px;
-    font-size: 16px;
-    min-height: 32px;
-    min-width: 36px;
-}
-
-QToolButton#headerOverflowButton:hover {
-    background: {{token.surface_raised}};
-    color: {{token.text}};
-    border-color: {{token.accent}};
-}
-
-QToolButton#headerOverflowButton:pressed {
-    background: {{token.surface}};
-}
-
-QToolButton#headerOverflowButton::menu-indicator {
-    image: none;
-}
-
-QToolButton#headerOverflowButton::menu-arrow {
-    image: none;
-}
-
-/* Transfer summary label shown in the header action strip */
-QLabel#transferSummary {
-    color: {{token.text_muted}};
-    font-size: 12px;
-    font-weight: 600;
-    padding: 0 4px;
-}
-
-
 /* ── Compact operational status strip ─────────────────────────── */
 
 QFrame#downloadStatusStrip {
-    min-height: 52px;
-    max-height: 52px;
+    min-height: 42px;
+    max-height: 42px;
     background: {{token.surface}};
     border: 1px solid {{token.border}};
     border-radius: {{token.radius_lg}};
 }
 
-QFrame#downloadStatusItem {
-    background: transparent;
-    border: none;
-}
-
-QFrame#downloadStatusItem[kind="session"] {
-    border-right: 1px solid {{token.border}};
-}
-
-QLabel#downloadSessionDot {
-    color: {{token.success}};
-    font-size: 14px;
-}
-
 QLabel#downloadSessionState {
     color: {{token.success}};
     font-weight: 600;
-}
-
-QLabel#downloadStatusIcon {
-    background: transparent;
 }
 
 QLabel#downloadStatusMetric {
@@ -121,7 +55,7 @@ QLabel#downloadConnectionText {
 /* ── Surface panels ────────────────────────────────────────────── */
 
 QFrame#downloadPanel,
-QFrame#downloadInspectorPanel {
+QFrame#downloadInspector {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
     border-radius: {{token.radius_lg}};
@@ -147,46 +81,14 @@ QLineEdit#downloadSearch:focus {
     border: 2px solid {{token.accent}};
 }
 
-/* ── Segmented control (downloads-specific override) ──────────── */
-
-QFrame#segmentedControl {
-    background: {{token.background}};
-    border: 1px solid {{token.border}};
-    border-radius: {{token.radius_md}};
-}
-
-QPushButton#segmentButton {
-    background: transparent;
-    color: {{token.text_muted}};
-    border: none;
-    border-radius: {{token.radius_md}};
-    min-height: 28px;
-    padding: 2px 10px;
-    font-size: 11px;
-}
-
-QPushButton#segmentButton:hover {
-    background: {{token.surface}};
-    color: {{token.text}};
-}
-
-QPushButton#segmentButton:checked {
-    background: {{token.surface_raised}};
-    color: {{token.text}};
-    font-weight: 650;
-}
-
 /* ── Tree view ─────────────────────────────────────────────────── */
 
 QTreeView#downloadsTable {
     background: {{token.surface}};
     alternate-background-color: #151E2D;
-    border: 1px solid {{token.border}};
-    border-top: none;
-    border-left: none;
-    border-right: none;
+    border: none;
     outline: none;
-    selection-background-color: #17345A;
+    selection-background-color: #24334A;
     selection-color: {{token.text}};
 }
 
@@ -200,86 +102,15 @@ QTreeView#downloadsTable::item:hover {
     background: {{token.surface_raised}};
 }
 
-QTreeView#downloadsTable::item:selected {
-    background: #17345A;
-}
-
-QTreeView#downloadsTable::branch {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:has-siblings:!adjoins-item {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:has-siblings:adjoins-item {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:!has-children:!has-siblings:adjoins-item {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:closed:has-children:!has-siblings {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:open:has-children:!has-siblings {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:has-children:!has-siblings:closed {
-    background: transparent;
-}
-
-QTreeView#downloadsTable::branch:has-children:!has-siblings:open {
-    background: transparent;
-}
-
 QTreeView#downloadsTable QHeaderView::section {
-    min-height: 34px;
+    min-height: 32px;
     background: {{token.surface_raised}};
     border: none;
-    border-bottom: 1px solid {{token.border}};
+    border-bottom: 1px solid transparent;
     padding: 0 8px;
 }
 
-/* ── Transfer activity panel (speed chart) ────────────────────── */
-
-QFrame#transferActivityPanel {
-    background: {{token.surface}};
-    border: none;
-    border-top: 1px solid {{token.border}};
-}
-
-QLabel#chartDownloadLegend {
-    color: {{token.info_fg}};
-    font-size: 11px;
-    font-weight: 600;
-}
-
-QLabel#chartUploadLegend {
-    color: {{token.success}};
-    font-size: 11px;
-    font-weight: 600;
-}
-
-QLabel#chartRange {
-    color: {{token.text_muted}};
-    font-size: 11px;
-}
-
-/* Legacy chart selectors (backward compat) */
-QLabel#chartCurrent {
-    color: {{token.accent}};
-    font-weight: 600;
-}
-
-QLabel#chartPeak {
-    color: {{token.text_muted}};
-}
-
-/* ── Summary bar (error-only variant) ─────────────────────────── */
+/* ── Summary bar ───────────────────────────────────────────────── */
 
 QFrame#downloadSummaryBar {
     background: {{token.surface_raised}};
@@ -292,9 +123,14 @@ QLabel#downloadSummaryText {
     font-size: 12px;
 }
 
-QLabel#downloadSummarySpeed {
+QLabel#downloadSummarySpeed,
+QLabel#chartCurrent {
     color: {{token.accent}};
     font-weight: 600;
+}
+
+QLabel#chartPeak {
+    color: {{token.text_muted}};
 }
 
 /* ── Section / panel titles ────────────────────────────────────── */
@@ -303,7 +139,7 @@ QLabel#panelTitle {
     font-family: "{{token.body_font}}";
     color: {{token.text}};
     font-weight: 600;
-    font-size: 13px;
+    font-size: 14px;
 }
 
 /* ── Status badges ─────────────────────────────────────────────── */
@@ -340,17 +176,11 @@ QLabel#downloadStatusBadge[state="failed"] {
 
 /* ── Inspector ─────────────────────────────────────────────────── */
 
-QFrame#downloadInspectorPanel {
-    background: {{token.surface}};
-    border: 1px solid {{token.border}};
-    border-radius: {{token.radius_lg}};
-}
-
 QLabel#downloadInspectorTitle {
     font-family: "{{token.body_font}}";
     color: {{token.text}};
     font-weight: 600;
-    font-size: 15px;
+    font-size: 16px;
 }
 
 QLabel#downloadInspectorSubtitle,
@@ -381,8 +211,8 @@ QLabel#downloadInspectorError {
 }
 
 QProgressBar#downloadInspectorProgress {
-    min-height: 7px;
-    max-height: 7px;
+    min-height: 9px;
+    max-height: 9px;
     border: none;
     border-radius: {{token.radius_sm}};
     background: {{token.surface_raised}};

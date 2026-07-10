@@ -1,13 +1,32 @@
-/* Inspector scaffold and property list styles. */
-
-/* Property list key column */
+/* Inspectors and property lists. */
+QFrame#inspectorScaffold,
+QFrame#inspectorPanel {
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_lg}};
+}
 QLabel#propertyListLabel {
     color: {{token.text_muted}};
     font-size: 11px;
     min-width: 96px;
 }
-/* Property list value column (middle-elided, selectable) */
 QLabel#propertyListValue {
     color: {{token.text}};
     font-size: 11px;
+}
+QPushButton#inspectorAction {
+    text-align: left;
+    background: transparent;
+    border-color: transparent;
+    color: {{token.text}};
+    padding-left: 9px;
+}
+QPushButton#inspectorAction:hover {
+    background: {{token.surface_hover}};
+    border-color: {{token.border}};
+}
+QScrollArea#inspectorScroll,
+QScrollArea#inspectorScroll > QWidget > QWidget {
+    background: transparent;
+    border: none;
 }

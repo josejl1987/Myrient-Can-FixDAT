@@ -25,12 +25,8 @@ from minerva.domain.downloads import (
     DownloadStatus,
 )
 from minerva.ui.icons import Icons
-from minerva.ui.models.download_delegates import (
-    DownloadMoreDelegate,
-    DownloadNameDelegate,
-    DownloadProgressDelegate,
-    DownloadStatusDelegate,
-)
+from minerva.ui.models.delegates import ActionDelegate, IconDelegate
+from minerva.ui.models.download_delegates import DownloadProgressDelegate
 from minerva.ui.models.download_model import (
     _DOWNLOAD_COLUMNS,
     DownloadRecord,
@@ -177,7 +173,6 @@ class DownloadsPage(BasePage):
         self._last_total_down: float | None = None
         # Tracks whether the user explicitly chose a filter tab. When
         # ``False`` the smart default is applied on first data load.
-        self._user_set_filter = False
         self._torrent_engine_connected = True  # native session runs in-process
         self._resolve_controller()
 
@@ -192,60 +187,28 @@ class DownloadsPage(BasePage):
 
     def _build_ui(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(16)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
 
         self._header = PageHeader(
             "Downloads",
-            "Manage active and queued downloads.",
+            "Manage the active queue, monitor progress, and control native torrent engine tasks.",
         )
-        self._transfer_summary = QtWidgets.QLabel("0 B/s  ↓    0 B/s  ↑")
-        self._transfer_summary.setObjectName("downloadTransferSummary")
-        self._header.add_widget(self._transfer_summary)
-        self._pause_all_btn = self._header.add_action(
-            "Pause all", Icons.pause(), primary=True
-        )
-
-        # Keep the individual actions as real buttons for shortcut/test
-        # compatibility, but expose them through a single overflow menu.
+        self._pause_all_btn = self._header.add_action("Pause all", Icons.pause())
         self._resume_all_btn = self._header.add_action("Resume all", Icons.play())
         self._pause_selected_btn = self._header.add_action("Pause selected", Icons.pause())
+        # Selection-scoped actions remain available to tests, shortcuts and
+        # context menus, but no longer consume permanent header space.
         self._resume_selected_btn = self._header.add_action("Resume selected", Icons.play())
         self._cancel_selected_btn = self._header.add_action(
             "Remove selected", Icons.trash(), danger=True
         )
         for button in (
-            self._resume_all_btn,
             self._pause_selected_btn,
             self._resume_selected_btn,
             self._cancel_selected_btn,
         ):
             button.hide()
-
-        self._overflow_btn = QtWidgets.QToolButton()
-        self._overflow_btn.setObjectName("downloadHeaderOverflow")
-        self._overflow_btn.setText("…")
-        self._overflow_btn.setToolTip("More download actions")
-        self._overflow_btn.setPopupMode(
-            QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup
-        )
-        self._overflow_menu = QtWidgets.QMenu(self._overflow_btn)
-        self._resume_all_action = self._overflow_menu.addAction(
-            Icons.play(), "Resume all"
-        )
-        self._overflow_menu.addSeparator()
-        self._pause_selected_action = self._overflow_menu.addAction(
-            Icons.pause(), "Pause selected"
-        )
-        self._resume_selected_action = self._overflow_menu.addAction(
-            Icons.play(), "Resume selected"
-        )
-        self._overflow_menu.addSeparator()
-        self._remove_selected_action = self._overflow_menu.addAction(
-            Icons.trash(), "Remove selected"
-        )
-        self._overflow_btn.setMenu(self._overflow_menu)
-        self._header.add_widget(self._overflow_btn)
         root.addWidget(self._header)
 
         # ── KPI strip ──────────────────────────────────────────────────
@@ -284,60 +247,35 @@ class DownloadsPage(BasePage):
             action_text="Open Library",
         )
         self._empty_state.action_clicked.connect(self._open_library)
-
         self._content_state = ContentState()
         self._content_state.set_empty(self._empty_state)
         self._results_widget = self._build_content_widget()
         self._content_state.set_content(self._results_widget)
         root.addWidget(self._content_state, 1)
 
-
     def _build_status_strip(self) -> QtWidgets.QFrame:
         strip = QtWidgets.QFrame()
         strip.setObjectName("downloadStatusStrip")
         layout = QtWidgets.QHBoxLayout(strip)
-        layout.setContentsMargins(8, 0, 8, 0)
-        layout.setSpacing(0)
+        layout.setContentsMargins(12, 8, 12, 8)
+        layout.setSpacing(18)
 
-        session = QtWidgets.QFrame()
-        session.setObjectName("downloadStatusItem")
-        session.setProperty("kind", "session")
-        session_layout = QtWidgets.QHBoxLayout(session)
-        session_layout.setContentsMargins(12, 0, 12, 0)
-        session_layout.setSpacing(8)
-        dot = QtWidgets.QLabel("●")
-        dot.setObjectName("downloadSessionDot")
-        session_layout.addWidget(dot)
-        self._session_state = QtWidgets.QLabel("Session active")
+        self._session_state = QtWidgets.QLabel("●  Session active")
         self._session_state.setObjectName("downloadSessionState")
-        session_layout.addWidget(self._session_state)
-        session_layout.addStretch(1)
-        layout.addWidget(session, 1)
+        layout.addWidget(self._session_state)
+        layout.addStretch(1)
 
         self._status_values: dict[str, QtWidgets.QLabel] = {}
-        metric_specs = (
-            ("active", "Active", Icons.download()),
-            ("queued", "Queued", Icons.queue()),
-            ("completed", "Completed", Icons.check()),
-            ("failed", "Failed", Icons.error()),
-        )
-        for key, title, icon in metric_specs:
-            item = QtWidgets.QFrame()
-            item.setObjectName("downloadStatusItem")
-            item.setProperty("kind", key)
-            item_layout = QtWidgets.QHBoxLayout(item)
-            item_layout.setContentsMargins(12, 0, 12, 0)
-            item_layout.setSpacing(8)
-            icon_label = QtWidgets.QLabel()
-            icon_label.setObjectName("downloadStatusIcon")
-            icon_label.setPixmap(icon.pixmap(15, 15))
-            item_layout.addWidget(icon_label)
+        for key, title in (
+            ("active", "Active"),
+            ("queued", "Queued"),
+            ("completed", "Completed"),
+            ("failed", "Failed"),
+        ):
             label = QtWidgets.QLabel(f"{title}  0")
             label.setObjectName("downloadStatusMetric")
             label.setProperty("kind", key)
-            item_layout.addWidget(label)
-            item_layout.addStretch(1)
-            layout.addWidget(item, 1)
+            layout.addWidget(label)
             self._status_values[key] = label
         return strip
 
@@ -351,7 +289,8 @@ class DownloadsPage(BasePage):
         self._queue_panel = SurfacePanel("Download Queue")
         self._queue_panel.body_layout.setSpacing(0)
 
-        # Toolbar: restrained search + count-bearing status filters
+
+        # Toolbar: search + status tabs
         toolbar = QtWidgets.QFrame()
         toolbar.setObjectName("downloadToolbar")
         toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
@@ -359,12 +298,9 @@ class DownloadsPage(BasePage):
         toolbar_layout.setSpacing(10)
         self._search = QtWidgets.QLineEdit()
         self._search.setObjectName("downloadSearch")
-        self._search.setPlaceholderText("Search downloads…")
+        self._search.setPlaceholderText("Search downloads\u2026")
         self._search.setClearButtonEnabled(True)
-        self._search.setMinimumWidth(240)
-        self._search.setMaximumWidth(360)
-        toolbar_layout.addWidget(self._search)
-        toolbar_layout.addStretch(1)
+        toolbar_layout.addWidget(self._search, 1)
         self._segments = SegmentedControl([
             ("all", "All"),
             ("active", "Active"),
@@ -375,8 +311,7 @@ class DownloadsPage(BasePage):
         toolbar_layout.addWidget(self._segments)
         self._queue_panel.body_layout.addWidget(toolbar)
 
-        # Two-level torrent -> file queue.  Rich delegates provide the
-        # hierarchy and secondary metadata without adding icon-only columns.
+        # Tree view — groups by torrent
         self._view = QtWidgets.QTreeView()
         self._view.setObjectName("downloadsTable")
         self._view.setModel(self._proxy)
@@ -389,68 +324,77 @@ class DownloadsPage(BasePage):
         self._view.setEditTriggers(
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
-        self._view.setAlternatingRowColors(False)
-        self._view.setSortingEnabled(False)
+        self._view.setAlternatingRowColors(True)
+        self._view.setSortingEnabled(False)  # tree sorting not supported by proxy
         self._view.setRootIsDecorated(True)
-        self._view.setUniformRowHeights(False)
+        self._view.setUniformRowHeights(True)
         self._view.setAnimated(False)
-        self._view.setIndentation(14)
+        self._view.setIndentation(16)
         self._view.setAllColumnsShowFocus(True)
         self._view.setExpandsOnDoubleClick(True)
         self._view.setItemsExpandable(True)
-        self._view.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
-
+        self._view.collapseAll()
         header = self._view.header()
-        header.setMinimumSectionSize(28)
-        header.setDefaultSectionSize(38)
+        header.setMinimumSectionSize(24)
+        header.setDefaultSectionSize(34)
         header.setStretchLastSection(False)
         for col in range(len(_DOWNLOAD_COLUMNS)):
             header.setSectionResizeMode(col, QtWidgets.QHeaderView.ResizeMode.Fixed)
-        header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
         column_widths = {
-            1: 118,  # status
+            0: 32,   # status icon
             2: 96,   # progress
-            3: 84,   # down
-            4: 78,   # up
-            5: 62,   # ETA
-            6: 72,   # seeds
-            7: 58,   # ratio
-            8: 38,   # overflow
+            3: 86,   # speed
+            4: 68,   # ETA
+            5: 52,   # seeds
+            6: 56,   # ratio
+            7: 72,   # actions
         }
         for col, width in column_widths.items():
             header.resizeSection(col, width)
 
-        self._name_delegate = DownloadNameDelegate(self._view)
-        self._status_delegate = DownloadStatusDelegate(self._view)
+        # Delegates for icon, progress, and action columns
+        self._view.setItemDelegateForColumn(0, IconDelegate(self._view))
         self._progress_delegate = DownloadProgressDelegate(parent=self._view)
-        self._more_delegate = DownloadMoreDelegate(self._view)
-        self._view.setItemDelegateForColumn(0, self._name_delegate)
-        self._view.setItemDelegateForColumn(1, self._status_delegate)
         self._view.setItemDelegateForColumn(2, self._progress_delegate)
-        self._view.setItemDelegateForColumn(8, self._more_delegate)
-        self._more_delegate.menu_requested.connect(self._show_row_menu)
-        # Compatibility alias for code that still expects an action delegate.
-        self._action_delegate = self._more_delegate
-
-        # The mock treats telemetry as part of the workspace, not as a cramped
-        # tab hidden below a mostly-empty table.  Activity remains available to
-        # the controller for logging, but is not permanently occupying space.
-        self._speed_chart = SpeedChart()
-        self._activity_list = ActivityList(max_items=50)
-        self._activity_list.hide()
-        self._clear_activity_btn = QtWidgets.QPushButton("Clear")
-        self._clear_activity_btn.hide()
-        self._clear_activity_btn.clicked.connect(self._activity_list.clear)
+        self._action_delegate = ActionDelegate(self._view)
+        self._view.setItemDelegateForColumn(7, self._action_delegate)
+        self._action_delegate.action_triggered.connect(self._on_action)
         self._bottom_tabs = QtWidgets.QTabWidget()
-        self._bottom_tabs.hide()
+        self._bottom_tabs.setObjectName("downloadBottomTabs")
+        self._bottom_tabs.setMinimumHeight(150)
+        self._bottom_tabs.setMaximumHeight(220)
+        self._bottom_tabs.setVisible(False)
+        self._bottom_tabs.tabBar().setObjectName("bottomTabBar")
 
+        self._speed_chart = SpeedChart()
+        self._bottom_tabs.addTab(self._speed_chart, "Throughput")
+
+        activity_tab = QtWidgets.QWidget()
+        activity_tab_layout = QtWidgets.QVBoxLayout(activity_tab)
+        activity_tab_layout.setContentsMargins(0, 0, 0, 0)
+        activity_tab_layout.setSpacing(0)
+        activity_header_row = QtWidgets.QHBoxLayout()
+        activity_title = QtWidgets.QLabel("Recent activity")
+        activity_title.setObjectName("panelTitle")
+        activity_header_row.addWidget(activity_title)
+        activity_header_row.addStretch(1)
+        self._activity_list = ActivityList(max_items=50)
+        self._clear_activity_btn = QtWidgets.QPushButton("Clear")
+        self._clear_activity_btn.setObjectName("linkButton")
+        self._clear_activity_btn.clicked.connect(self._activity_list.clear)
+        activity_header_row.addWidget(self._clear_activity_btn)
+        activity_tab_layout.addLayout(activity_header_row)
+        activity_tab_layout.addWidget(self._activity_list)
+        self._bottom_tabs.addTab(activity_tab, "Activity")
+
+        # Workspace: table stacked above bottom chart
         workspace = QtWidgets.QWidget()
-        workspace.setObjectName("downloadQueueWorkspace")
         workspace_layout = QtWidgets.QVBoxLayout(workspace)
         workspace_layout.setContentsMargins(0, 0, 0, 0)
-        workspace_layout.setSpacing(12)
+        workspace_layout.setSpacing(0)
         workspace_layout.addWidget(self._view, 1)
-        workspace_layout.addWidget(self._speed_chart, 0)
+        workspace_layout.addWidget(self._bottom_tabs)
 
         # Inspector
         self._inspector = DownloadInspector()
@@ -495,7 +439,6 @@ class DownloadsPage(BasePage):
         self._speed_label.hide()
         summary_layout.addWidget(self._speed_label)
         self._queue_panel.body_layout.addWidget(self._summary)
-        self._summary.hide()
 
         layout.addWidget(self._queue_panel, 1)
         return widget
@@ -508,10 +451,6 @@ class DownloadsPage(BasePage):
         self._pause_selected_btn.clicked.connect(self._pause_selected)
         self._resume_selected_btn.clicked.connect(self._resume_selected)
         self._cancel_selected_btn.clicked.connect(self._cancel_selected)
-        self._resume_all_action.triggered.connect(self._resume_all)
-        self._pause_selected_action.triggered.connect(self._pause_selected)
-        self._resume_selected_action.triggered.connect(self._resume_selected)
-        self._remove_selected_action.triggered.connect(self._cancel_selected)
         self._view.selectionModel().selectionChanged.connect(
             self._on_selection_changed
         )
@@ -601,91 +540,45 @@ class DownloadsPage(BasePage):
             return
         self._last_refresh_signature = sig
 
-        selected_ids = self._selected_queue_ids() if hasattr(self, "_view") else []
-        records: list[DownloadRecord] = []
+        records = []
         for index, dl in enumerate(queue):
-            raw_status = getattr(dl, "status", DownloadStatus.QUEUED.value)
-            if isinstance(raw_status, DownloadStatus):
-                status = raw_status
-            else:
-                try:
-                    status = DownloadStatus(raw_status)
-                except (ValueError, TypeError):
-                    status = DownloadStatus.QUEUED
-
-            raw_id = getattr(dl, "id", index + 1)
-            queue_id = str(getattr(dl, "queue_id", "") or raw_id)
-            filename = getattr(dl, "filename", "") or f"Download {index + 1}"
-            record = DownloadRecord(
-                id=raw_id,
-                queue_id=queue_id,
-                file_id=getattr(dl, "file_id", None),
-                filename=filename,
-                url=getattr(dl, "url", "") or getattr(dl, "torrent_url", "") or "",
-                status=status,
-                progress=float(getattr(dl, "progress", 0.0) or 0.0),
-                speed=float(getattr(dl, "speed", 0.0) or 0.0),
-                upload_speed=float(getattr(dl, "upload_speed", 0.0) or 0.0),
-                eta_seconds=float(getattr(dl, "eta_seconds", 0.0) or 0.0),
-                destination=getattr(dl, "destination", "") or "",
-                torrent_name=getattr(dl, "torrent_name", "") or filename,
-                torrent_hash=getattr(dl, "torrent_hash", None),
-                save_path=getattr(dl, "save_path", "") or "",
-                collection=getattr(dl, "collection", "") or "",
-                system=getattr(dl, "system", "") or "",
-                report_id=str(getattr(dl, "report_id", "") or ""),
-                report_name=getattr(dl, "report_name", "") or "",
-                error_message=(
-                    getattr(dl, "error_message", None)
-                    or getattr(dl, "error", None)
-                ),
-                peers=int(getattr(dl, "peers", 0) or 0),
-                seeds=int(getattr(dl, "seeds", 0) or 0),
-                ratio=float(getattr(dl, "ratio", 0.0) or 0.0),
-            )
-            record.haystack = " ".join(
-                (
-                    record.filename,
-                    record.destination,
-                    record.torrent_name,
-                    record.collection,
-                    record.system,
-                    record.report_name,
+            # QueueRecord.status is a raw string (the enum's .value);
+            # normalize to DownloadStatus so downstream code can use
+            # .value, .name, and set membership uniformly.
+            raw_status = dl.status
+            try:
+                status = DownloadStatus(raw_status)
+            except (ValueError, TypeError):
+                status = DownloadStatus.QUEUED
+            if hasattr(dl, "filename"):
+                record = DownloadRecord(
+                    id=getattr(dl, "id", index + 1),
+                    queue_id=getattr(dl, "queue_id", str(getattr(dl, "id", index + 1))),
+                    file_id=getattr(dl, "file_id", None) or index + 1,
+                    filename=dl.filename,
+                    url=getattr(dl, "url", ""),
+                    status=status,
+                    torrent_name=getattr(dl, "torrent_name", "") or dl.filename,
                 )
-            ).casefold()
+            else:
+                record = DownloadRecord(
+                    id=getattr(dl, "id", index + 1),
+                    queue_id=getattr(dl, "id", str(index + 1)),
+                    file_id=getattr(dl, "file_id", None) or index + 1,
+                    filename=getattr(dl, "filename", ""),
+                    url="",
+                    status=status,
+                )
             records.append(record)
 
         self._model.set_records(records)
-        self._proxy.invalidateFilter()
+        # Reset inspector cache so the next _sync_inspector_if_changed
+        # actually refreshes — the selected record may have new data.
         self._inspector_record_id = None
         if records:
             self._content_state.set_content(self._results_widget)
-            self._update_dashboard()
-            self._restore_selection(selected_ids)
-            if not self._view.selectionModel().selectedRows():
-                self._select_first_visible_record()
         else:
             self._content_state.set_empty(self._empty_state)
-            self._inspector.clear()
-            self._inspector.setVisible(False)
-            self._update_dashboard()
-
-    def _select_first_visible_record(self) -> None:
-        """Expand the first visible group and select its first file."""
-        if self._proxy.rowCount() <= 0:
-            return
-        group_index = self._proxy.index(0, 0)
-        if not group_index.isValid():
-            return
-        self._view.expand(group_index)
-        target = self._proxy.index(0, 0, group_index)
-        if not target.isValid():
-            target = group_index
-        self._view.selectionModel().setCurrentIndex(
-            target,
-            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
-            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
-        )
 
     def _load_library_items(
         self, file_ids: list[int]
@@ -750,7 +643,6 @@ class DownloadsPage(BasePage):
                         record.torrent_name,
                         record.collection,
                         record.system,
-                        record.report_name,
                     )
                 ).casefold()
             pos = self._model.flat_index_of(record.queue_id)
@@ -772,15 +664,12 @@ class DownloadsPage(BasePage):
         total_up = sum(runtime.upload_speed for runtime in runtimes)
         self._speed_chart.add_data_point(total_down, total_up)
         self._speed_label.setText(f"{format_speed(total_down)} down")
-        self._transfer_summary.setText(
-            f"{format_speed(total_down)}  ↓    {format_speed(total_up)}  ↑"
-        )
-        # Show inline speed chart when there's traffic, hide when idle
+        # Show the bottom chart on first telemetry signal, hide when idle
         if total_down > 0 or total_up > 0:
-            if not self._speed_chart.isVisible():
-                self._speed_chart.setVisible(True)
-        elif self._speed_chart.isVisible():
-            self._speed_chart.setVisible(False)
+            if not self._bottom_tabs.isVisible():
+                self._bottom_tabs.setVisible(True)
+        elif self._bottom_tabs.isVisible() and total_down == 0 and total_up == 0:
+            self._bottom_tabs.setVisible(False)
         # Skip the aggregate dashboard work if total speed hasn't
         # changed — no aggregate-bearing field can have moved, so the
         # counts and subtitles are still valid.
@@ -805,7 +694,6 @@ class DownloadsPage(BasePage):
             record.status == DownloadStatus.QUEUED for record in records
         )
         total_down = sum(record.speed for record in records)
-        total_up = sum(record.upload_speed for record in records)
         cancelled = sum(
             record.status == DownloadStatus.CANCELLED for record in records
         )
@@ -832,9 +720,6 @@ class DownloadsPage(BasePage):
         self._status_values["queued"].setText(f"Queued  {queued}")
         self._status_values["completed"].setText(f"Completed  {completed}")
         self._status_values["failed"].setText(f"Failed  {failed}")
-        self._transfer_summary.setText(
-            f"{format_speed(total_down)}  ↓    {format_speed(total_up)}  ↑"
-        )
 
         # ── Segment counts ──────────────────────────────────────────────
         counts = {
@@ -873,10 +758,8 @@ class DownloadsPage(BasePage):
                 f"{len(failed_records)} failed: {', '.join(parts)}"
             )
             self._error_summary.setVisible(True)
-            self._summary.setVisible(True)
         else:
             self._error_summary.setVisible(False)
-            self._summary.setVisible(False)
 
         # ── Action button states ────────────────────────────────────────
         torrent_engine_ok = self._torrent_engine_connected
@@ -892,7 +775,6 @@ class DownloadsPage(BasePage):
             )
         )
         self._resume_all_btn.setToolTip(torrent_engine_tip)
-        self._resume_all_action.setEnabled(self._resume_all_btn.isEnabled())
         selected = self._selected_records()
         has_selected_active = any(
             r.status in active_states for r in selected
@@ -907,13 +789,6 @@ class DownloadsPage(BasePage):
         self._resume_selected_btn.setToolTip(torrent_engine_tip)
         self._cancel_selected_btn.setEnabled(torrent_engine_ok and bool(selected))
         self._cancel_selected_btn.setToolTip(torrent_engine_tip)
-        self._pause_selected_action.setEnabled(self._pause_selected_btn.isEnabled())
-        self._resume_selected_action.setEnabled(self._resume_selected_btn.isEnabled())
-        self._remove_selected_action.setEnabled(self._cancel_selected_btn.isEnabled())
-        self._overflow_btn.setEnabled(
-            torrent_engine_ok and bool(selected)
-            and (has_selected_active or has_selected_resumable)
-        )
         self._sync_inspector_if_changed()
 
     def _apply_smart_default_filter(self, records: list) -> None:
@@ -970,18 +845,7 @@ class DownloadsPage(BasePage):
         self._resume_selected_btn.setToolTip(torrent_engine_tip)
         self._cancel_selected_btn.setEnabled(torrent_engine_ok and bool(selected))
         self._cancel_selected_btn.setToolTip(torrent_engine_tip)
-        self._pause_selected_action.setEnabled(self._pause_selected_btn.isEnabled())
-        self._resume_selected_action.setEnabled(self._resume_selected_btn.isEnabled())
-        self._remove_selected_action.setEnabled(self._cancel_selected_btn.isEnabled())
-        has_selected_active = any(r.status in active_states for r in selected)
-        has_selected_resumable = any(
-            r.status in {DownloadStatus.QUEUED, DownloadStatus.PAUSED}
-            for r in selected
-        )
-        self._overflow_btn.setEnabled(
-            torrent_engine_ok and bool(selected)
-            and (has_selected_active or has_selected_resumable)
-        )
+
     def _on_status_filter(self, key: str) -> None:
         self._user_set_filter = True
         self._proxy.set_status(key)
@@ -1099,15 +963,10 @@ class DownloadsPage(BasePage):
             source_index = self._model.flat_index(group_row, child_row, 0)
             proxy = self._proxy.mapFromSource(source_index)
             if proxy.isValid():
-                if proxy.parent().isValid():
-                    self._view.expand(proxy.parent())
                 selection.select(
                     proxy,
                     QtCore.QItemSelectionModel.SelectionFlag.Select
                     | QtCore.QItemSelectionModel.SelectionFlag.Rows,
-                )
-                selection.setCurrentIndex(
-                    proxy, QtCore.QItemSelectionModel.SelectionFlag.NoUpdate
                 )
 
     def _pause_all(self) -> None:
@@ -1222,63 +1081,6 @@ class DownloadsPage(BasePage):
         QtGui.QDesktopServices.openUrl(
             QtCore.QUrl.fromLocalFile(str(folder))
         )
-
-    def _show_row_menu(self, proxy_index: QtCore.QModelIndex) -> None:
-        """Select the row behind the more (⋯) delegate and open its context menu."""
-        if not proxy_index.isValid():
-            return
-        self._view.selectionModel().setCurrentIndex(
-            proxy_index,
-            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
-            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
-        )
-        selected = self._selected_records()
-        if not selected:
-            return
-        record = selected[0]
-        menu = QtWidgets.QMenu(self)
-        active_states = {
-            DownloadStatus.STARTING,
-            DownloadStatus.DOWNLOADING,
-            DownloadStatus.SEEDING,
-        }
-        resumable_states = {DownloadStatus.QUEUED, DownloadStatus.PAUSED}
-        if record.status in active_states:
-            menu.addAction(
-                Icons.pause(),
-                "Pause",
-                lambda: self._pause_record(record.queue_id),
-            )
-        elif record.status in resumable_states:
-            menu.addAction(
-                Icons.play(),
-                "Resume",
-                lambda: self._resume_record(record.queue_id),
-            )
-        if record.status == DownloadStatus.FAILED:
-            menu.addAction(
-                Icons.retry(),
-                "Retry",
-                lambda: self._retry_record(record.queue_id),
-            )
-        menu.addAction(
-            Icons.folder_open(),
-            "Open folder",
-            lambda: self._open_folder(
-                record.destination or record.save_path
-            ),
-        )
-        menu.addSeparator()
-        menu.addAction(
-            Icons.trash(),
-            "Remove from queue",
-            lambda: self._remove_record(record.queue_id),
-        )
-        rect = self._view.visualRect(proxy_index)
-        global_pos = self._view.viewport().mapToGlobal(
-            QtCore.QPoint(rect.right() - 4, rect.center().y())
-        )
-        menu.exec(global_pos)
 
     def _show_context_menu(self, position: QtCore.QPoint) -> None:
         # If right-clicked on a row not in the current selection, select it.
@@ -1412,6 +1214,9 @@ class DownloadsPage(BasePage):
             value = self._settings.value("downloads/workspace_splitter")
             if isinstance(value, list) and value and self._inspector.isVisible():
                 self._main_splitter.setSizes([int(part) for part in value])
+        tab_index = self._settings.value("downloads/bottom_tab", 0, int)
+        if hasattr(self, "_bottom_tabs"):
+            self._bottom_tabs.setCurrentIndex(tab_index)
         header_state = self._settings.value("downloads/header_state")
         if header_state and hasattr(self, "_view"):
             self._view.header().restoreState(header_state)
@@ -1421,6 +1226,9 @@ class DownloadsPage(BasePage):
         self._settings.setValue(
             "downloads/workspace_splitter",
             mw.sizes() if mw else [],
+        )
+        self._settings.setValue(
+            "downloads/bottom_tab", self._bottom_tabs.currentIndex()
         )
         self._settings.setValue(
             "downloads/header_state",

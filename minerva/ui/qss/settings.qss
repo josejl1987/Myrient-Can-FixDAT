@@ -1,0 +1,53 @@
+/* Settings dashboard. */
+QListWidget#settingsCategories {
+    min-width: 210px;
+    max-width: 210px;
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_lg}};
+    padding: 8px;
+    outline: none;
+}
+QListWidget#settingsCategories::item {
+    min-height: 42px;
+    padding: 2px 12px;
+    margin: 2px 0;
+    border: 1px solid transparent;
+    border-radius: {{token.radius_md}};
+    color: {{token.text_muted}};
+    font-weight: 600;
+}
+QListWidget#settingsCategories::item:hover {
+    background: {{token.surface_hover}};
+    color: {{token.text}};
+}
+QListWidget#settingsCategories::item:selected {
+    background: {{token.info_bg}};
+    color: {{token.info_fg}};
+    border-color: {{token.info_border}};
+}
+QWidget#settingsPageContent { background: transparent; }
+QFrame#appearancePreview {
+    background: {{token.surface_sunken}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_lg}};
+}
+QFrame#previewSidebar {
+    background: {{token.sidebar}};
+    border-right: 1px solid {{token.border}};
+    border-top-left-radius: {{token.radius_lg}};
+    border-bottom-left-radius: {{token.radius_lg}};
+}
+QLabel#logFilePath {
+    color: {{token.text}};
+    background: {{token.surface_sunken}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 7px 10px;
+    font-size: 11px;
+}
+QFormLayout QLabel { color: {{token.text_muted}}; }
+QLabel#subtleLabel[dirty="true"] {
+    color: {{token.warning}};
+    font-weight: 650;
+}

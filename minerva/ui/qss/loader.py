@@ -1,14 +1,4 @@
-"""QSS loading with a defined cascade order.
-
-Order (concatenated in this sequence):
-
-    base → panels → inspectors → actions → states → library → downloads → collections
-
-All page-specific QSS files are loaded globally so that shared selectors
-defined in them (e.g. ``accentButton`` in library.qss) are available to
-every page.  Pages that need overrides should target their own objectName
-selectors, not invent new shared ones.
-"""
+"""QSS loading with a defined application-wide cascade order."""
 
 from __future__ import annotations
 
@@ -18,6 +8,11 @@ _HERE = Path(__file__).resolve().parent
 
 _ORDER = [
     "base.qss",
+    "layout.qss",
+    "controls.qss",
+    "tables.qss",
+    "navigation.qss",
+    "cards.qss",
     "panels.qss",
     "inspectors.qss",
     "actions.qss",
@@ -31,13 +26,10 @@ _ORDER = [
 
 
 def load_qss(page_name: str | None = None) -> str:
-    """Load and concatenate all QSS files in the canonical cascade order.
+    """Load and concatenate the complete QSS cascade.
 
-    Args:
-        page_name: Deprecated — kept for backward compatibility.  All
-            page-specific QSS files are now loaded globally so that
-            shared selectors (``accentButton``, ``libraryTable``, etc.)
-            are available on every page.
+    ``page_name`` is retained for API compatibility; all selectors are loaded
+    globally because shared widgets can appear on more than one page.
     """
     parts: list[str] = []
     for name in _ORDER:
@@ -48,5 +40,4 @@ def load_qss(page_name: str | None = None) -> str:
 
 
 def all_qss_files() -> list[str]:
-    """Return the full ordered list of QSS filenames (for diagnostics)."""
     return list(_ORDER)

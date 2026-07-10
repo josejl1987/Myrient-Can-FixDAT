@@ -10,9 +10,9 @@ from pathlib import Path
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from minerva.app.app_sidebar import AppSidebar
 from minerva.app.app_state import AppState
 from minerva.app.download_controller import DownloadController
-from minerva.app.app_sidebar import AppSidebar
 from minerva.app.page_id import PageId
 from minerva.app.page_registry import PageRegistry
 from minerva.app.pages import (
@@ -22,14 +22,15 @@ from minerva.app.pages import (
     SettingsPage,
 )
 from minerva.app.worker_manager import WorkerManager
-from minerva_db import DEFAULT_INDEX_PATH, DEFAULT_TORRENT_DIR, MinervaDB
 from minerva.native_torrent import NativeTorrentSession
-from minerva_state import MinervaState
 from minerva.ui.a11y import apply_a11y_defaults
 from minerva.ui.density import Density
 from minerva.ui.theme import ThemeTokens, apply_theme
+from minerva_db import DEFAULT_INDEX_PATH, DEFAULT_TORRENT_DIR, MinervaDB
+from minerva_state import MinervaState
+
 if typing.TYPE_CHECKING:
-    from collections.abc import Iterable
+    pass
 
 log = logging.getLogger(__name__)
 
@@ -88,6 +89,8 @@ class AppShell(QtWidgets.QMainWindow):
 
         # Native QMainWindow chrome (no FramelessWindowHint)
         self.setWindowTitle("Minerva Can FixDAT")
+        self.setMinimumSize(1100, 700)
+        self.resize(1440, 900)
 
         self._init_actions()
         self._init_ui()
@@ -193,6 +196,7 @@ class AppShell(QtWidgets.QMainWindow):
     def _init_ui(self) -> None:
         """Build the central widget: sidebar (left) + stack (right)."""
         central = QtWidgets.QWidget()
+        central.setObjectName("shellCentral")
         self.setCentralWidget(central)
 
         layout = QtWidgets.QHBoxLayout(central)
@@ -215,7 +219,7 @@ class AppShell(QtWidgets.QMainWindow):
         layout.addWidget(self._stack, stretch=1)
 
         # Status bar
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage("Ready · Local workspace")
 
         # Enable drag-and-drop on the central area
         self.setAcceptDrops(True)
@@ -315,7 +319,6 @@ class AppShell(QtWidgets.QMainWindow):
         CWD-relative location.  The resolved absolute paths are persisted
         back to QSettings so every reader benefits.
         """
-        from minerva_db import DEFAULT_INDEX_PATH, DEFAULT_TORRENT_DIR
 
         # Anchor: project root = shell.py's parent's parent's parent.
         _proj_root = Path(__file__).resolve().parent.parent.parent
@@ -369,7 +372,7 @@ class AppShell(QtWidgets.QMainWindow):
             controller.activity_event.connect(self._app_state.activity_event.emit)
             controller.file_spec_resolver = lambda file_id: db.get_download_spec(
                 file_id,
-                torrent_dir,
+                Path(torrent_dir),
             )
             self._download_controller = controller
             self._app_state.index_db = db

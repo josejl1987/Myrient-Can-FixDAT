@@ -1,0 +1,87 @@
+/* Application sidebar and secondary navigation. */
+QWidget#appSidebar {
+    background: {{token.sidebar}};
+    border-right: 1px solid {{token.border}};
+}
+QWidget#sidebarBrand {
+    background: transparent;
+    border: none;
+}
+QLabel#sidebarLogo {
+    min-width: 34px;
+    max-width: 34px;
+    min-height: 34px;
+    max-height: 34px;
+    color: white;
+    background: {{token.accent}};
+    border: 1px solid {{token.focus_ring}};
+    border-radius: 17px;
+    font-size: 16px;
+    font-weight: 800;
+}
+QLabel#sidebarHeader {
+    color: {{token.text}};
+    font-size: 13px;
+    font-weight: 750;
+    letter-spacing: 0.8px;
+}
+QLabel#sidebarSubtitle {
+    color: {{token.text_subtle}};
+    font-size: 9px;
+    font-weight: 650;
+    letter-spacing: 1px;
+}
+QLabel#sidebarSectionLabel {
+    color: {{token.text_subtle}};
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    padding: 4px 16px 6px 16px;
+}
+QPushButton#sidebarRow {
+    min-height: {{density.nav_height}}px;
+    background: transparent;
+    color: {{token.text_muted}};
+    text-align: left;
+    padding: 0 14px;
+    border: 1px solid transparent;
+    border-radius: {{token.radius_md}};
+    font-size: 13px;
+    font-weight: 600;
+}
+QPushButton#sidebarRow:hover {
+    background: {{token.surface_hover}};
+    color: {{token.text}};
+}
+QPushButton#sidebarRow:focus { border-color: {{token.focus_ring}}; }
+QPushButton#sidebarRow[active="true"] {
+    background: {{token.info_bg}};
+    color: {{token.info_fg}};
+    border-color: {{token.info_border}};
+}
+QFrame#sidebarFooter {
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+}
+QLabel#sidebarFooterDot {
+    color: {{token.success}};
+    font-size: 13px;
+}
+QLabel#sidebarFooterTitle {
+    color: {{token.text}};
+    font-size: 11px;
+    font-weight: 650;
+}
+QLabel#sidebarFooterSubtitle,
+QLabel#selectionBadge {
+    color: {{token.text_subtle}};
+    font-size: 10px;
+}
+QLabel#selectionBadge {
+    background: {{token.info_bg}};
+    color: {{token.info_fg}};
+    border: 1px solid {{token.info_border}};
+    border-radius: 11px;
+    padding: 2px 8px;
+}

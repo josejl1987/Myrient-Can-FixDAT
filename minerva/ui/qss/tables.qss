@@ -1,0 +1,48 @@
+/* Tables, trees and list views. */
+QTableView,
+QTreeView,
+QListView {
+    background: {{token.surface}};
+    alternate-background-color: {{token.surface}};
+    color: {{token.text}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    gridline-color: transparent;
+    selection-background-color: {{token.info_bg}};
+    selection-color: {{token.text}};
+    outline: none;
+    font-size: 12px;
+}
+QTableView::item,
+QTreeView::item,
+QListView::item {
+    min-height: {{density.row_height}}px;
+    padding: 4px 9px;
+    border: none;
+    border-bottom: 1px solid {{token.border}};
+}
+QTableView::item:hover:!selected,
+QTreeView::item:hover:!selected,
+QListView::item:hover:!selected { background: {{token.surface_hover}}; }
+QTableView::item:selected,
+QTreeView::item:selected,
+QListView::item:selected {
+    background: {{token.info_bg}};
+    color: {{token.text}};
+}
+QHeaderView::section {
+    min-height: 34px;
+    background: {{token.surface_raised}};
+    color: {{token.text_muted}};
+    padding: 0 9px;
+    border: none;
+    border-bottom: 1px solid {{token.border_strong}};
+    font-weight: 650;
+    font-size: 11px;
+}
+QTableCornerButton::section {
+    background: {{token.surface_raised}};
+    border: none;
+    border-bottom: 1px solid {{token.border_strong}};
+}
+QTreeView::branch { background: transparent; }

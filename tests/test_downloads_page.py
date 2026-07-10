@@ -8,15 +8,19 @@ signal wiring, and widget lifecycle.
 from __future__ import annotations
 
 from PyQt6 import QtWidgets
+from PyQt6.QtCore import QSortFilterProxyModel as SortFilterProxy
 
 from minerva.app.app_state import AppState
 from minerva.app.pages import DownloadPageState, DownloadsPage
 from minerva.app.worker_manager import WorkerManager
 from minerva.domain.downloads import DownloadStatus
-from minerva.ui.models.delegates import ActionDelegate
-from minerva.ui.models.download_delegates import DownloadProgressDelegate
+from minerva.ui.models.download_delegates import (
+    DownloadMoreDelegate,
+    DownloadNameDelegate,
+    DownloadProgressDelegate,
+    DownloadStatusDelegate,
+)
 from minerva.ui.models.download_model import DownloadTableModel
-from PyQt6.QtCore import QSortFilterProxyModel as SortFilterProxy
 
 # ---------------------------------------------------------------------------
 # ModelTester availability
@@ -82,42 +86,31 @@ def test_proxy_source_is_download_model(qtbot):
 
 def test_column_count_matches_spec(qtbot):
     """GIVEN a constructed DownloadsPage WHEN the source model's column
-    count is queried THEN it equals 8."""
+    count is queried THEN it equals 9."""
     page = _make_page()
     qtbot.addWidget(page)
     proxy = page._view.model()
     source = proxy.sourceModel()
-    assert source.columnCount() == 8
+    assert source.columnCount() == 9
 
 
 def test_delegates_assigned(qtbot):
-    """GIVEN a constructed DownloadsPage WHEN delegates are queried
-    THEN column 0 gets IconDelegate, column 2 gets DownloadProgressDelegate,
-    and column 7 gets ActionDelegate."""
-    from minerva.ui.models.delegates import IconDelegate
+    """The queue uses rich identity, status, progress and overflow delegates."""
     page = _make_page()
     qtbot.addWidget(page)
 
-    del_0 = page._view.itemDelegateForColumn(0)
-    del_2 = page._view.itemDelegateForColumn(2)
-    del_7 = page._view.itemDelegateForColumn(7)
-    assert isinstance(del_0, IconDelegate)
-    assert isinstance(del_2, DownloadProgressDelegate)
-    assert isinstance(del_7, ActionDelegate)
+    assert isinstance(page._view.itemDelegateForColumn(0), DownloadNameDelegate)
+    assert isinstance(page._view.itemDelegateForColumn(1), DownloadStatusDelegate)
+    assert isinstance(page._view.itemDelegateForColumn(2), DownloadProgressDelegate)
+    assert isinstance(page._view.itemDelegateForColumn(8), DownloadMoreDelegate)
 
 
-def test_action_delegate_connected(qtbot):
-    """GIVEN a constructed DownloadsPage WHEN the ActionDelegate is
-    checked THEN its action_triggered signal is connected to
-    _on_action."""
+def test_overflow_delegate_connected(qtbot):
+    """The overflow delegate opens the contextual row menu."""
     page = _make_page()
     qtbot.addWidget(page)
-    receivers = page._action_delegate.receivers(
-        page._action_delegate.action_triggered,
-    )
-    assert receivers > 0, (
-        "action_triggered should have at least one slot"
-    )
+    receivers = page._more_delegate.receivers(page._more_delegate.menu_requested)
+    assert receivers > 0
 
 
 # ============================================================================
@@ -201,7 +194,7 @@ def test_modeltester_on_source(qtbot):
         tester = QAbstractItemModelTester(source)  # noqa: F841
     else:
         assert source.rowCount() == 0
-        assert source.columnCount() == 8
+        assert source.columnCount() == 9
         from PyQt6.QtCore import QModelIndex
 
         assert source.data(QModelIndex()) is None
