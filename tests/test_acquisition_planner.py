@@ -170,6 +170,7 @@ class TestComputeBudgets:
         constraints = AcquisitionConstraints(reserve_free_bytes=10)
         seed_budget, output_budget = AcquisitionPlanner._compute_budgets(
             usage, usage, committed, constraints, same_fs=True, hardlink_ok=True,
+            seed_dev=0, output_dev=0,
         )
         assert seed_budget == output_budget
         assert seed_budget <= 140
@@ -180,6 +181,7 @@ class TestComputeBudgets:
         constraints = AcquisitionConstraints(reserve_free_bytes=10)
         seed_budget, output_budget = AcquisitionPlanner._compute_budgets(
             usage, usage, committed, constraints, same_fs=True, hardlink_ok=False,
+            seed_dev=0, output_dev=0,
         )
         assert seed_budget > output_budget  # seed gets full free; output gets reserved-committed budget
 
@@ -190,6 +192,7 @@ class TestComputeBudgets:
         constraints = AcquisitionConstraints(reserve_free_bytes=10, max_total_bytes=100)
         s, o = AcquisitionPlanner._compute_budgets(
             seed_usage, out_usage, committed, constraints, same_fs=False, hardlink_ok=False,
+            seed_dev=0, output_dev=0,
         )
         assert s <= 100
         assert o <= 100
@@ -202,6 +205,7 @@ class TestBuildVolumes:
         seed_dir = out_dir = Path("/tmp")
         vols = AcquisitionPlanner._build_volumes(
             seed_dir, out_dir, usage, usage, {}, 0, 0, constraints,
+            seed_dev=0, output_dev=0,
         )
         assert all(v.fits for v in vols)
 
@@ -211,6 +215,7 @@ class TestBuildVolumes:
         seed_dir = out_dir = Path("/tmp")
         vols = AcquisitionPlanner._build_volumes(
             seed_dir, out_dir, usage, usage, {}, 20, 20, constraints,
+            seed_dev=0, output_dev=0,
         )
         assert all(not v.fits for v in vols)
 
@@ -239,7 +244,6 @@ class TestCommittedBytes:
         ))
 
         planner = AcquisitionPlanner(state=state, db=db, settings={
-            "qbit/save_path": str(seed_dir),
             "downloads/output_dir": str(out_dir),
         })
         committed = planner._committed_bytes(seed_dir, out_dir)
@@ -263,7 +267,6 @@ class TestCommittedBytes:
         ))
 
         planner = AcquisitionPlanner(state=state, db=db, settings={
-            "qbit/save_path": str(seed_dir),
             "downloads/output_dir": str(out_dir),
         })
         committed = planner._committed_bytes(seed_dir, out_dir)
@@ -404,7 +407,7 @@ class TestCollectCandidates:
 
 class TestBuildPlan:
     def test_end_to_end_selects_file(self, tmp_path):
-        seed_dir = tmp_path / ".qbitseed"
+        seed_dir = tmp_path / ".torrentseed"
         out_dir = tmp_path / "downloads"
         seed_dir.mkdir()
         out_dir.mkdir()
@@ -419,7 +422,6 @@ class TestBuildPlan:
         db.get_files_by_ids.return_value = [_make_item(10, size=50)]
 
         planner = AcquisitionPlanner(state=state, db=db, settings={
-            "qbit/save_path": str(seed_dir),
             "downloads/output_dir": str(out_dir),
         })
         plan = planner.build_plan(
@@ -434,7 +436,7 @@ class TestBuildPlan:
         assert len(plan.volumes) == 2
 
     def test_max_file_count_deferred(self, tmp_path):
-        seed_dir = tmp_path / ".qbitseed"
+        seed_dir = tmp_path / ".torrentseed"
         out_dir = tmp_path / "downloads"
         seed_dir.mkdir()
         out_dir.mkdir()
@@ -446,10 +448,9 @@ class TestBuildPlan:
         state.get_report.return_value = None
         state.list_queue.return_value = []
         db = MagicMock()
-        db.get_files_by_ids.side_effect = lambda ids: [_make_item(ids[0], size=10)]
+        db.get_files_by_ids.side_effect = lambda ids: [_make_item(fid, size=10) for fid in ids]
 
         planner = AcquisitionPlanner(state=state, db=db, settings={
-            "qbit/save_path": str(seed_dir),
             "downloads/output_dir": str(out_dir),
         })
         plan = planner.build_plan(
@@ -462,7 +463,7 @@ class TestBuildPlan:
         assert "max file count" in plan.deferred[0].reason
 
     def test_max_size_deferred(self, tmp_path):
-        seed_dir = tmp_path / ".qbitseed"
+        seed_dir = tmp_path / ".torrentseed"
         out_dir = tmp_path / "downloads"
         seed_dir.mkdir()
         out_dir.mkdir()
@@ -476,7 +477,6 @@ class TestBuildPlan:
         db.get_files_by_ids.return_value = [_make_item(10, size=1024)]
 
         planner = AcquisitionPlanner(state=state, db=db, settings={
-            "qbit/save_path": str(seed_dir),
             "downloads/output_dir": str(out_dir),
         })
         plan = planner.build_plan(

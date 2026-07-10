@@ -2,7 +2,7 @@
 Shared widget primitives for the Minerva design system.
 
 Only foundational primitives are re-exported here. Page-specific widgets
-(InspectorPanel, LibraryInspector, CollectionInspector, DownloadInspector,
+(LibraryInspector, CollectionInspector, DownloadInspector,
 ReportNavigator, CollectionNavigator, etc.) must be imported directly from
 their module.
 """

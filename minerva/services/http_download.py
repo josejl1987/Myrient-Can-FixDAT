@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Callable
@@ -9,6 +10,10 @@ from typing import Callable
 import requests
 
 log = logging.getLogger(__name__)
+
+
+class CancelledError(Exception):
+    """Raised when a download is cancelled via cancel_event."""
 
 
 class HttpDownloadAdapter:
@@ -19,10 +24,12 @@ class HttpDownloadAdapter:
         max_retries: int = 5,
         backoff_base: float = 2.0,
         chunk_size: int = 65536,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self.max_retries = max_retries
         self.backoff_base = backoff_base
         self.chunk_size = chunk_size
+        self._cancel_event = cancel_event
 
     def download(
         self,
@@ -37,11 +44,16 @@ class HttpDownloadAdapter:
         Calls *on_progress* with a fraction ``[0.0, 1.0]``, throttled to 1 %
         granularity.
 
-        Raises :class:`RuntimeError` when retries are exhausted.
+        Raises :class:`CancelledError` if the cancel event is set.
+        Raises :class:`RuntimeError` when retries are exhausted or size
+        validation fails.
         """
         last_exception: Exception | None = None
 
         for attempt in range(1, self.max_retries + 1):
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise CancelledError("Download cancelled before start")
+
             part_path = destination.with_suffix(destination.suffix + ".part")
             try:
                 response = requests.get(url, stream=True, timeout=30)
@@ -65,6 +77,12 @@ class HttpDownloadAdapter:
 
                 with part_path.open("wb") as f:
                     for chunk in response.iter_content(chunk_size=self.chunk_size):
+                        # Check cancellation during transfer
+                        if self._cancel_event is not None and self._cancel_event.is_set():
+                            response.close()
+                            f.close()
+                            part_path.unlink(missing_ok=True)
+                            raise CancelledError("Download cancelled during transfer")
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
@@ -77,10 +95,23 @@ class HttpDownloadAdapter:
                                     last_reported = bucket
                                     on_progress(fraction)
 
+                # Size validation — permanent failure, not retried.
                 if expected_size is not None and downloaded != expected_size:
                     raise RuntimeError(
                         f"Downloaded size {downloaded} does not match "
                         f"expected size {expected_size}"
+                    )
+
+                # Check if destination already exists (idempotency)
+                if destination.exists():
+                    if destination.stat().st_size == downloaded:
+                        part_path.unlink(missing_ok=True)
+                        if on_progress:
+                            on_progress(1.0)
+                        return destination
+                    raise RuntimeError(
+                        f"Destination exists with different size: "
+                        f"{destination.stat().st_size} vs {downloaded}"
                     )
 
                 part_path.rename(destination)
@@ -91,6 +122,9 @@ class HttpDownloadAdapter:
 
                 return destination
 
+            except CancelledError:
+                # Cancellation is deliberate — don't retry, just propagate.
+                raise
             except requests.exceptions.HTTPError as exc:
                 status = exc.response.status_code if exc.response is not None else 0
                 log.warning(

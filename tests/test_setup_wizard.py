@@ -30,24 +30,14 @@ def test_wizard_has_three_steps(qtbot):
 
 
 def test_is_first_run_no_settings(tmp_path, monkeypatch):
-    """GIVEN no qBit settings AND no index WHEN is_first_run is called
+    """GIVEN no index WHEN is_first_run is called
     THEN it returns True."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     settings = QtCore.QSettings("MinervaFixDAT", "MinervaGUI_test_first_run")
     settings.clear()
 
-    # No qBit URL and no index path
+    # No index path
     assert is_first_run(settings) is True
-
-
-def test_is_not_first_run_with_settings(tmp_path, monkeypatch):
-    """GIVEN existing qBit settings WHEN is_first_run is called
-    THEN it returns False."""
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    settings = QtCore.QSettings("MinervaFixDAT", "MinervaGUI_test_not_first")
-    settings.setValue("qbit_url", "http://localhost:8080")
-
-    assert is_first_run(settings) is False
 
 
 def test_is_not_first_run_with_index(tmp_path, monkeypatch):
@@ -63,15 +53,15 @@ def test_is_not_first_run_with_index(tmp_path, monkeypatch):
     assert is_first_run(settings) is False
 
 
-def test_wizard_step_one_has_connection_fields(qtbot):
-    """GIVEN SetupWizard WHEN page 1 is shown THEN it has qBit
-    connection fields."""
+def test_wizard_step_one_has_engine_check(qtbot):
+    """GIVEN SetupWizard WHEN page 1 is shown THEN it exposes the native engine check."""
     wizard = SetupWizard()
     qtbot.add_widget(wizard)
 
     page = wizard.page(0)
-    # The page should have input fields for qBit connection
     assert page is not None
+    assert hasattr(page, "_test_btn")
+    assert hasattr(page, "_test_status")
 
 
 def test_wizard_step_three_has_output_dir(qtbot):

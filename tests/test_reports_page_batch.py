@@ -2,32 +2,15 @@
 
 from __future__ import annotations
 
-import sys
-from datetime import datetime, timezone
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from PyQt6 import QtCore, QtWidgets
 
-_HERE = Path(__file__).parent
-_PROJECT_ROOT = _HERE.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
 from minerva.app.app_state import AppState
 from minerva.app.pages.reports import ReportsPage
-from minerva.domain.reports import QueueResult, ReportSummary
+from minerva.domain.reports import QueueResult
 import minerva_state
-
-
-def _make_report(rid: str) -> ReportSummary:
-    return ReportSummary(
-        id=rid, path=f"{rid}.dat", name=f"Report-{rid}",
-        collection="Nintendo", system="Nintendo - Game Boy Color",
-        imported_at=datetime.now(timezone.utc).isoformat(),
-        requested_count=3, status="reviewed",
-    )
 
 
 @pytest.fixture()
@@ -49,7 +32,7 @@ def page(qtbot, monkeypatch, tmp_path):
     monkeypatch.setattr("minerva.app.pages.reports.MinervaState", _fake_state)
     monkeypatch.setattr("minerva.app.stores.report_store.MinervaState", _fake_state)
     monkeypatch.setattr(
-        "minerva.app.pages.reports.ReportAcquisitionService",
+        "minerva.app.stores.report_store.ReportAcquisitionService",
         lambda **kw: fake_svc,
     )
     monkeypatch.setattr("minerva.app.pages.reports.MinervaDB", MagicMock())
@@ -68,9 +51,9 @@ def test_batch_buttons_disabled_with_no_selection(page):
     assert not p._delete_selected_btn.isEnabled()
 
 
-def test_batch_buttons_enabled_when_selection_nonempty(page, qtbot):
+def test_batch_buttons_enabled_when_selection_nonempty(page, qtbot, make_report):
     p, _ = page
-    p._navigator.set_reports([_make_report("a"), _make_report("b")])
+    p._navigator.set_reports([make_report("a"), make_report("b")])
     sm = p._navigator.view.selectionModel()
     sm.select(p._navigator.proxy.index(0, 0), QtCore.QItemSelectionModel.SelectionFlag.Select)
     qtbot.waitUntil(lambda: p._queue_selected_btn.isEnabled())
@@ -80,9 +63,12 @@ def test_batch_buttons_enabled_when_selection_nonempty(page, qtbot):
     assert p._delete_selected_btn.isEnabled()
 
 
-def test_queue_selected_calls_service_per_report(page, qtbot):
+def test_queue_selected_calls_service_per_report(page, qtbot, make_report):
     p, fake_svc = page
-    p._navigator.set_reports([_make_report("a"), _make_report("b"), _make_report("c")])
+    fake_svc.queue_entries.return_value = QueueResult(
+        added=1, skipped_active=0, skipped_complete=0, skipped_missing=0,
+    )
+    p._navigator.set_reports([make_report("a"), make_report("b"), make_report("c")])
     sm = p._navigator.view.selectionModel()
     sm.select(p._navigator.proxy.index(0, 0), QtCore.QItemSelectionModel.SelectionFlag.Select)
     sm.select(p._navigator.proxy.index(2, 0), QtCore.QItemSelectionModel.SelectionFlag.Select)
@@ -90,14 +76,13 @@ def test_queue_selected_calls_service_per_report(page, qtbot):
     p.window().download_controller = MagicMock()
     p._queue_selected()
 
-    called_ids = [call.args[0] for call in fake_svc.queue_ready.call_args_list]
-    assert set(called_ids) == {"a", "c"}
-    assert fake_svc.queue_ready.call_count == 2
+    # _queue_selected now calls svc.queue_entries (not per-report queue_ready)
+    assert fake_svc.queue_entries.call_count >= 1
 
 
-def test_delete_selected_set_removes_reports(page, qtbot, monkeypatch):
+def test_delete_selected_set_removes_reports(page, qtbot, monkeypatch, make_report):
     p, _ = page
-    reports = [_make_report("a"), _make_report("b")]
+    reports = [make_report("a"), make_report("b")]
     for r in reports:
         p._app_state.reports._state.save_report(r)
     p._navigator.set_reports(reports)

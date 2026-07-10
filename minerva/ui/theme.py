@@ -11,14 +11,12 @@ from minerva.ui.qss.loader import load_qss
 @dataclass(frozen=True)
 class ThemeTokens:
     # Core surfaces
-    background: str = "#0F172A"
-    surface: str = "#1E293B"
-    surface_raised: str = "#334155"
-    border: str = "#475569"
-
-    # Typography
-    text: str = "#F8FAFC"
-    text_muted: str = "#94A3B8"
+    background: str = "#0B1220"
+    surface: str = "#111827"
+    surface_raised: str = "#1B2638"
+    border: str = "#263244"
+    text: str = "#E5E7EB"
+    text_muted: str = "#8B98AA"
     disabled_text: str = "#475569"
     scrollbar: str = "#334155"
 

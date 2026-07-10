@@ -56,11 +56,11 @@ class StatusBadge(QtWidgets.QLabel):
     def _apply_style(self) -> None:
         fg, bg, border = self._colour_for_kind(self._kind)
         vertical = 3 if self._density is not Density.SPACIOUS else 4
-        horizontal = 9 if self._density is Density.COMPACT else 10
+        horizontal = 9 if self._density is not Density.COMPACT else 8
         self.setStyleSheet(
             "QLabel#statusBadge {"
             f" color: {fg}; background: {bg}; border: 1px solid {border};"
-            f" padding: {vertical}px {horizontal}px; border-radius: 10px;"
+            f" padding: {vertical}px {horizontal}px; border-radius: {self._tokens.radius_lg};"
             " font-size: 11px; font-weight: 600;"
             "}"
         )

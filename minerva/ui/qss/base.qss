@@ -50,20 +50,44 @@ QWidget#appSidebar {
     background-color: {{token.background}};
     border-right: 1px solid {{token.border}};
 }
+QLabel#sidebarHeader {
+    color: {{token.text}};
+    font-size: 11px;
+    padding: 12px 8px 12px 16px;
+    background-color: {{token.background}};
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+QFrame#sidebarSeparator {
+    background-color: {{token.surface}};
+    border: none;
+}
 QPushButton#sidebarRow {
     background: transparent;
     color: {{token.text_muted}};
     text-align: left;
     padding-left: 16px;
     border: none;
+    border-left: 3px solid transparent;
     border-radius: 0;
     font-size: 13px;
 }
 QPushButton#sidebarRow:hover { background: {{token.surface}}; color: {{token.text}}; }
 QPushButton#sidebarRow:focus { border-left: 3px solid {{token.accent}}; }
+QPushButton#sidebarRow[active="true"] {
+    background: {{token.surface}};
+    color: {{token.accent}};
+    border-left: 3px solid {{token.accent}};
+}
+QLabel#selectionBadge {
+    color: {{token.text_muted}};
+    font-size: 11px;
+    padding: 0 16px;
+}
 
 /* ── Panels and cards ───────────────────────────────────────────────────── */
 QFrame#surfaceCard,
+QFrame#surfacePanel,
 QFrame#metricCard,
 QFrame#navigatorPanel,
 QFrame#workspacePanel,

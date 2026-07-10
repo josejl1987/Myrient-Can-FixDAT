@@ -2,18 +2,20 @@
 Display, size, checkbox, progress-bar, and action-button delegates.
 
 *   ``DisplayDelegate`` — ``QStyledItemDelegate`` that renders ``displayText``
-    via ``str()``.
+*   via ``str()``.
+*   ``IconDelegate`` — renders a qtawesome icon name string as a centered
+*   ``QIcon`` (no text drawn).
 *   ``SizeDelegate`` — formats integer byte values as human-readable binary
-    sizes (B / KB / MB / GB / TB / PB).  Negative values display as ``-``.
-    Matches legacy ``format_bytes`` in ``minerva_gui.py:3884`` (Decision 10).
+*   sizes (B / KB / MB / GB / TB / PB).  Negative values display as ``-``.
+*   Matches legacy ``format_bytes`` in ``minerva_gui.py:3884`` (Decision 10).
 *   ``CheckboxDelegate`` — click-to-toggle checkbox column.  ``editorEvent``
-    detects ``MouseButtonRelease`` inside the indicator rect and commits the
-    new ``CheckState`` via ``model.setData()`` + ``commitData.emit()``
-    (Decision 9).
+*   detects ``MouseButtonRelease`` inside the indicator rect and commits the
+*   new ``CheckState`` via ``model.setData()`` + ``commitData.emit()``
+*   (Decision 9).
 *   ``ProgressDelegate`` — paints a native progress bar from a 0.0–1.0 float
-    stored in ``UserRole`` (Decision 3).
+*   stored in ``UserRole`` (Decision 3).
 *   ``ActionDelegate`` — draws unicode action buttons (▶/⏸/✕) per download
-    status, emits ``action_triggered(index, action)`` on click (Decision 4).
+*   status, emits ``action_triggered(index, action)`` on click (Decision 4).
 """
 
 from __future__ import annotations
@@ -34,6 +36,55 @@ class DisplayDelegate(QStyledItemDelegate):
     def displayText(self, value: object, locale: QtCore.QLocale) -> str:
         """Return ``str(value)`` (format_fn dispatch is handled by model)."""
         return str(value)
+
+
+class IconDelegate(QStyledItemDelegate):
+    """Renders a qtawesome icon name (e.g. ``"fa5s.hourglass-half"``) as a
+    centered ``QIcon``.  The cell value is the icon name string; no text is
+    drawn.
+
+    Usage::
+
+        view.setItemDelegateForColumn(0, IconDelegate(view))
+    """
+
+    _ICON_SIZE = 16
+
+    def paint(
+        self,
+        painter: QtGui.QPainter,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> None:
+        """Paint the icon centered in the cell. Falls back to nothing if
+        the icon name is empty or the icon cannot be loaded."""
+        import qtawesome as qta
+
+        name = index.data(Qt.ItemDataRole.UserRole)
+        if not name or not isinstance(name, str):
+            return
+        try:
+            icon = qta.icon(name)
+        except Exception:
+            return
+        painter.save()
+        # Background for selection/hover
+        if option.state & QtWidgets.QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, option.palette.highlight())
+        elif option.state & QtWidgets.QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, option.palette.alternateBase())
+        pixmap = icon.pixmap(self._ICON_SIZE, self._ICON_SIZE)
+        x = option.rect.x() + (option.rect.width() - self._ICON_SIZE) // 2
+        y = option.rect.y() + (option.rect.height() - self._ICON_SIZE) // 2
+        painter.drawPixmap(x, y, pixmap)
+        painter.restore()
+
+    def sizeHint(
+        self,
+        option: QtWidgets.QStyleOptionViewItem,
+        index: QtCore.QModelIndex,
+    ) -> QtCore.QSize:
+        return QtCore.QSize(self._ICON_SIZE + 8, self._ICON_SIZE + 8)
 
 
 class SizeDelegate(DisplayDelegate):

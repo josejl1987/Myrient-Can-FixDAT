@@ -3,7 +3,7 @@ Tests for RomM destination mapping, path-fragment detection, and rematch flow.
 
 Covers:
 - romm_destination() slug lookup + path construction
-- _SYSTEM_TO_ROMM_SLUG invariants (canonical forms, variant consistency)
+- system_to_romm_slug invariants (canonical forms, variant consistency)
 - Path fragment detection (#platform-id in .json paths)
 - match_report with fragment paths (JSON library reports)
 - _build_candidates_html output structure
@@ -13,17 +13,11 @@ Covers:
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-_HERE = Path(__file__).parent
-_PROJECT_ROOT = _HERE.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from minerva.domain.reports import (
     MatchPolicy,
@@ -32,11 +26,9 @@ from minerva.domain.reports import (
     ResolutionState,
     ReviewEntry,
 )
-from minerva.services.report_acquisition import (
-    ReportAcquisitionService,
-    _SYSTEM_TO_ROMM_SLUG,
-    romm_destination,
-)
+from minerva.romm.paths import romm_destination
+from minerva.romm.platforms import system_to_romm_slug
+from minerva.services.report_acquisition import ReportAcquisitionService
 from minerva_db import DatEntry, MinervaDB, SCHEMA_V3
 from minerva_state import MinervaState
 
@@ -119,13 +111,13 @@ class TestRommDestination:
             "NEC - PC Engine - TurboGrafx-16": "pc-engine",
         }
         for system, expected_slug in canonical.items():
-            assert _SYSTEM_TO_ROMM_SLUG.get(system) == expected_slug, (
-                f"Expected {system!r} -> {expected_slug!r}, got {_SYSTEM_TO_ROMM_SLUG.get(system)!r}"
+            assert system_to_romm_slug().get(system) == expected_slug, (
+                f"Expected {system!r} -> {expected_slug!r}, got {system_to_romm_slug().get(system)!r}"
             )
 
 
 # ============================================================================
-# _SYSTEM_TO_ROMM_SLUG invariant tests
+# system_to_romm_slug invariant tests
 # ============================================================================
 
 
@@ -133,17 +125,17 @@ class TestSystemToRomSlugInvariants:
     """Structural invariants for the slug mapping."""
 
     def test_no_empty_slugs(self):
-        empty = [k for k, v in _SYSTEM_TO_ROMM_SLUG.items() if not v]
+        empty = [k for k, v in system_to_romm_slug().items() if not v]
         assert empty == [], f"Empty slugs for keys: {empty}"
 
     def test_no_empty_keys(self):
-        empty = [k for k in _SYSTEM_TO_ROMM_SLUG if not k]
+        empty = [k for k in system_to_romm_slug() if not k]
         assert empty == [], f"Empty keys found: {empty}"
 
     def test_slugs_are_lowercase_or_numeric(self):
         """Slugs should be lowercase with hyphens, not spaces or uppercase."""
         bad = []
-        for k, v in _SYSTEM_TO_ROMM_SLUG.items():
+        for k, v in system_to_romm_slug().items():
             if " " in v or v != v.lower():
                 bad.append((k, v))
         assert bad == [], f"Non-lowercase or space-containing slugs: {bad[:5]}"
@@ -158,7 +150,7 @@ class TestSystemToRomSlugInvariants:
         import re
 
         base_map: dict[str, set[str]] = {}
-        for system, slug in _SYSTEM_TO_ROMM_SLUG.items():
+        for system, slug in system_to_romm_slug().items():
             # Strip common prefixes
             base = system
             for prefix in ("Non-Redump - ", "RA - ", "Source Code - ", "Unofficial - "):
@@ -657,13 +649,10 @@ class TestPlannerRomMDestination:
         # Create output dir
         output_dir = tmp_path / "output"
         output_dir.mkdir()
-        seed_dir = tmp_path / "seed"
-        seed_dir.mkdir()
 
         # Configure settings
         settings = {
-            "output_dir": str(output_dir),
-            "seed_dir": str(seed_dir),
+            "downloads/output_dir": str(output_dir),
         }
 
         planner = AcquisitionPlanner(state=tmp_state, db=db, settings=settings)
@@ -733,3 +722,8 @@ class TestCDRomanceUrlBuilder:
             url = f"https://cdromance.org/?s={encoded}"
         assert "psx-iso" not in url
         assert "Test%20Game" in url
+
+
+def test_romm_slug_map_completeness():
+    """Assert no data was lost during the JSON extraction — must have 678 entries."""
+    assert len(system_to_romm_slug()) == 678

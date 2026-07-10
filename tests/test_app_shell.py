@@ -51,7 +51,7 @@ def test_shell_constructs_without_db(app_shell):
     """GIVEN AppShell WHEN constructed THEN it creates a window with
     native chrome and no DB dependency."""
     shell = app_shell
-    assert shell.windowTitle() == "Minerva FixDAT"
+    assert shell.windowTitle() == "Minerva Can FixDAT"
     # Native chrome — no FramelessWindowHint
     assert not (
         shell.windowFlags() & QtCore.Qt.WindowType.FramelessWindowHint

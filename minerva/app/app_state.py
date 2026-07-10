@@ -23,7 +23,7 @@ class AppState(QtCore.QObject):
     selected_count_changed(int) — emitted when *selected_game_ids* size
         changes.  The int argument is the new count.
     index_state_changed(object) — emitted when DB index status changes.
-    qbit_state_changed(object)  — emitted when qBittorrent connection
+    torrent_engine_state_changed(object)  — emitted when native torrent engine connection
         state changes.
     queue_changed()             — emitted when the download queue mutates.
 
@@ -36,7 +36,7 @@ class AppState(QtCore.QObject):
 
     selected_count_changed = QtCore.pyqtSignal(int)
     index_state_changed = QtCore.pyqtSignal(object)
-    qbit_state_changed = QtCore.pyqtSignal(object)
+    torrent_engine_state_changed = QtCore.pyqtSignal(object)
     queue_changed = QtCore.pyqtSignal()
     log_message = QtCore.pyqtSignal(str)
     runtime_changed = QtCore.pyqtSignal(list)
@@ -48,7 +48,10 @@ class AppState(QtCore.QObject):
         self._selected_game_ids: set[str] = set()
         self._current_report_id: str | None = None
         self._index_state: object = None
-        self._qbit_state: object = False
+        self._torrent_engine_state: object = False
+        self._output_dir: str | None = None
+        self._index_db: object | None = None  # set by AppShell; MinervaDB instance
+        self._index_db_path: str | None = None  # absolute path to the index DB
 
     # ── Read-only views ────────────────────────────────────────────────
 
@@ -75,14 +78,44 @@ class AppState(QtCore.QObject):
         self.index_state_changed.emit(value)
 
     @property
-    def qbit_state(self) -> object:
-        return self._qbit_state
+    def torrent_engine_state(self) -> object:
+        return self._torrent_engine_state
 
-    @qbit_state.setter
-    def qbit_state(self, value: object) -> None:
-        self._qbit_state = value
-        self.qbit_state_changed.emit(value)
+    @torrent_engine_state.setter
+    def torrent_engine_state(self, value: object) -> None:
+        self._torrent_engine_state = value
+        self.torrent_engine_state_changed.emit(value)
 
+    @property
+    def output_dir(self) -> str:
+        """Cached output directory from QSettings (read once, not per-call)."""
+        if self._output_dir is None:
+            self._output_dir = QtCore.QSettings(
+                "MinervaFixDAT", "MinervaGUI"
+            ).value("output_dir", "downloads", str)
+        return self._output_dir
+
+    def invalidate_output_dir(self) -> None:
+        """Clear the cached output_dir so the next read picks up changes."""
+        self._output_dir = None
+
+    @property
+    def index_db(self) -> object | None:
+        """The shared MinervaDB instance, set by AppShell."""
+        return self._index_db
+
+    @index_db.setter
+    def index_db(self, value: object | None) -> None:
+        self._index_db = value
+
+    @property
+    def index_db_path(self) -> str | None:
+        """Absolute path to the index DB, set by AppShell after path resolution."""
+        return self._index_db_path
+
+    @index_db_path.setter
+    def index_db_path(self, value: str | None) -> None:
+        self._index_db_path = value
     # ── Mutators (the ONLY way to change selection from outside) ───────
 
     def set_selected(self, ids: Iterable[str]) -> None:

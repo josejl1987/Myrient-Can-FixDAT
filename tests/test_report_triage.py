@@ -23,7 +23,6 @@ from minerva.domain.reports import (
     ReviewEntry,
 )
 from minerva.services.report_acquisition import ReportAcquisitionService
-from minerva_db import MinervaDB, SCHEMA_V3
 from minerva_state import MinervaState
 
 
@@ -42,33 +41,10 @@ def tmp_state():
     os.unlink(tmp.name)
 
 
-def _build_test_index(path: str) -> None:
-    """Build a small test index with known files."""
-    import sqlite3
-
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA journal_mode = OFF")
-    conn.execute("PRAGMA synchronous = OFF")
-    conn.executescript(SCHEMA_V3)
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3')",
-    )
-    conn.commit()
-    conn.close()
-
-
 @pytest.fixture
-def test_index(tmp_path):
-    """Create a small test index database."""
-    db_path = tmp_path / "test_index.db"
-    _build_test_index(str(db_path))
-    return db_path
-
-
-@pytest.fixture
-def test_db(test_index):
-    """Return a MinervaDB instance backed by the test index."""
-    return MinervaDB(db_path=test_index)
+def test_db(indexed_rom_db):
+    """Return a MinervaDB instance backed by the shared test index."""
+    return indexed_rom_db
 
 
 def _make_entries(

@@ -13,7 +13,8 @@ from minerva.app.app_state import AppState
 from minerva.app.pages import DownloadPageState, DownloadsPage
 from minerva.app.worker_manager import WorkerManager
 from minerva.domain.downloads import DownloadStatus
-from minerva.ui.models.delegates import ActionDelegate, ProgressDelegate
+from minerva.ui.models.delegates import ActionDelegate
+from minerva.ui.models.download_delegates import DownloadProgressDelegate
 from minerva.ui.models.download_model import DownloadTableModel
 from PyQt6.QtCore import QSortFilterProxyModel as SortFilterProxy
 
@@ -69,14 +70,14 @@ def test_view_model_is_proxy(qtbot):
 
 def test_proxy_source_is_download_model(qtbot):
     """GIVEN a constructed DownloadsPage WHEN the proxy's source model
-    is queried THEN it returns a DownloadTableModel-like type."""
+    is queried THEN it returns a TorrentGroupTreeModel."""
     page = _make_page()
     qtbot.addWidget(page)
     proxy = page._view.model()
     source = proxy.sourceModel()
-    type_name = type(source).__name__
-    assert "RecordListModel" in type_name, f"Expected RecordListModel, got {type_name}"
-    assert hasattr(source, "column_specs"), "Source model should have column_specs"
+    from minerva.ui.models.torrent_group import TorrentGroupTreeModel
+    assert isinstance(source, TorrentGroupTreeModel), f"Expected TorrentGroupTreeModel, got {type(source).__name__}"
+    assert hasattr(source, "_groups"), "Source model should have _groups"
 
 
 def test_column_count_matches_spec(qtbot):
@@ -91,13 +92,17 @@ def test_column_count_matches_spec(qtbot):
 
 def test_delegates_assigned(qtbot):
     """GIVEN a constructed DownloadsPage WHEN delegates are queried
-    THEN column 2 gets ProgressDelegate and column 7 gets ActionDelegate."""
+    THEN column 0 gets IconDelegate, column 2 gets DownloadProgressDelegate,
+    and column 7 gets ActionDelegate."""
+    from minerva.ui.models.delegates import IconDelegate
     page = _make_page()
     qtbot.addWidget(page)
 
+    del_0 = page._view.itemDelegateForColumn(0)
     del_2 = page._view.itemDelegateForColumn(2)
     del_7 = page._view.itemDelegateForColumn(7)
-    assert isinstance(del_2, ProgressDelegate)
+    assert isinstance(del_0, IconDelegate)
+    assert isinstance(del_2, DownloadProgressDelegate)
     assert isinstance(del_7, ActionDelegate)
 
 
@@ -125,7 +130,7 @@ def test_initial_state_empty(qtbot):
     checked THEN it is EMPTY."""
     page = _make_page()
     qtbot.addWidget(page)
-    assert page._content_state.currentIndex() == 0  # EMPTY
+    assert page._content_state.currentIndex() == 1  # EMPTY (ContentState: 0=loading, 1=empty)
 
 
 def test_starts_with_no_records(qtbot):
@@ -153,7 +158,7 @@ def test_manager_downloads_changed_connected(qtbot):
     qtbot.wait(50)
 
     assert page._model.rowCount() == 1
-    assert page._content_state.currentIndex() == 1  # RESULTS
+    assert page._content_state.currentIndex() == 3  # CONTENT (ContentState: 3=content)
 
 
 def test_manager_downloads_changed_clear(qtbot):
@@ -176,7 +181,7 @@ def test_manager_downloads_changed_clear(qtbot):
     qtbot.wait(50)
 
     assert page._model.rowCount() == 0
-    assert page._content_state.currentIndex() == 0  # EMPTY
+    assert page._content_state.currentIndex() == 1  # EMPTY (ContentState: 1=empty)
 
 
 # ============================================================================
@@ -272,3 +277,152 @@ def test_on_action_remove(qtbot):
 
     page._on_action(proxy_index, "remove")
     assert app_state.worker_manager._downloads[0].status == DownloadStatus.CANCELLED
+
+
+# ============================================================================
+# Multi-selection batch operations
+# ============================================================================
+
+
+def test_selected_records_empty(qtbot):
+    """GIVEN a DownloadsPage with no selection WHEN _selected_records
+    is called THEN an empty list is returned."""
+    page = _make_page()
+    qtbot.addWidget(page)
+    assert page._selected_records() == []
+
+
+def test_selected_records_single(qtbot):
+    """GIVEN a DownloadsPage with one record selected WHEN
+    _selected_records is called THEN a list with one record is returned."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    app_state.worker_manager.add_to_queue("test.zip", "https://example.com/test.zip")
+    page._refresh_from_controller()
+    idx = page._proxy.index(0, 0)
+    page._view.setCurrentIndex(idx)
+
+    records = page._selected_records()
+    assert len(records) == 1
+    assert records[0].filename == "test.zip"
+
+
+def test_pause_selected_pauses_active(qtbot):
+    """GIVEN selected downloads with active status WHEN _pause_selected
+    is called THEN only active downloads are paused."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    app_state.worker_manager.add_to_queue("active.zip", "https://example.com/active.zip")
+    app_state.worker_manager.add_to_queue("queued.zip", "https://example.com/queued.zip")
+    app_state.worker_manager._downloads[0].status = DownloadStatus.DOWNLOADING
+    app_state.worker_manager._active.add(1)
+    page._refresh_from_controller()
+
+    page._view.selectAll()
+    page._pause_selected()
+
+    assert app_state.worker_manager._downloads[0].status == DownloadStatus.PAUSED
+    # Queued download should not be affected by pause
+    assert app_state.worker_manager._downloads[1].status != DownloadStatus.PAUSED
+
+
+def test_resume_selected_resumes_paused(qtbot):
+    """GIVEN selected downloads with paused status WHEN _resume_selected
+    is called THEN only paused downloads are resumed."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    app_state.worker_manager.add_to_queue("paused.zip", "https://example.com/paused.zip")
+    app_state.worker_manager.add_to_queue("active.zip", "https://example.com/active.zip")
+    app_state.worker_manager._downloads[0].status = DownloadStatus.PAUSED
+    app_state.worker_manager._downloads[1].status = DownloadStatus.DOWNLOADING
+    app_state.worker_manager._active.add(2)
+    page._refresh_from_controller()
+
+    page._view.selectAll()
+    page._resume_selected()
+
+    assert app_state.worker_manager._downloads[0].status == DownloadStatus.DOWNLOADING
+    # Already-downloading should not be affected by resume
+    assert app_state.worker_manager._downloads[1].status == DownloadStatus.DOWNLOADING
+
+
+def test_toggle_pause_resume_selected_pauses(qtbot):
+    """GIVEN selected active downloads WHEN Space is pressed (toggle)
+    THEN active downloads are paused."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    app_state.worker_manager.add_to_queue("active.zip", "https://example.com/active.zip")
+    app_state.worker_manager._downloads[0].status = DownloadStatus.DOWNLOADING
+    app_state.worker_manager._active.add(1)
+    page._refresh_from_controller()
+    idx = page._proxy.index(0, 0)
+    page._view.setCurrentIndex(idx)
+    page._toggle_pause_resume_selected()
+
+    assert app_state.worker_manager._downloads[0].status == DownloadStatus.PAUSED
+
+
+def test_toggle_pause_resume_selected_resumes(qtbot):
+    """GIVEN selected paused downloads WHEN Space is pressed (toggle)
+    THEN paused downloads are resumed."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    app_state.worker_manager.add_to_queue("paused.zip", "https://example.com/paused.zip")
+    app_state.worker_manager._downloads[0].status = DownloadStatus.PAUSED
+    page._refresh_from_controller()
+    idx = page._proxy.index(0, 0)
+    page._view.setCurrentIndex(idx)
+    page._toggle_pause_resume_selected()
+
+    assert app_state.worker_manager._downloads[0].status == DownloadStatus.DOWNLOADING
+
+
+def test_batch_buttons_disabled_when_no_selection(qtbot):
+    """GIVEN a DownloadsPage with records but no selection WHEN
+    _on_selection_changed fires THEN batch buttons are disabled."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    app_state.worker_manager.add_to_queue("test.zip", "https://example.com/test.zip")
+    page._refresh_from_controller()
+    page._torrent_engine_connected = True
+
+    # Clear selection
+    page._view.clearSelection()
+    page._on_selection_changed()
+
+    assert not page._pause_selected_btn.isEnabled()
+    assert not page._resume_selected_btn.isEnabled()
+    assert not page._cancel_selected_btn.isEnabled()
+
+
+def test_batch_buttons_enabled_with_selection(qtbot):
+    """GIVEN a DownloadsPage with a selected active download and
+    native torrent engine connected WHEN _on_selection_changed fires THEN
+    pause/remove buttons are enabled."""
+    app_state = _make_app_state()
+    page = _make_page(app_state)
+    qtbot.addWidget(page)
+
+    page._torrent_engine_connected = True  # native torrent engine is connected
+    app_state.worker_manager.add_to_queue("test.zip", "https://example.com/test.zip")
+    app_state.worker_manager._downloads[0].status = DownloadStatus.DOWNLOADING
+    app_state.worker_manager._active.add(1)
+    page._refresh_from_controller()
+    idx = page._proxy.index(0, 0)
+    page._view.setCurrentIndex(idx)
+    page._on_selection_changed()
+
+    assert page._pause_selected_btn.isEnabled()
+    assert page._cancel_selected_btn.isEnabled()

@@ -12,18 +12,13 @@ Run with::
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 import pytest
 
-# ── Ensure project root is on sys.path ──────────────────────────────────
-_HERE = Path(__file__).parent
-_PROJECT_ROOT = _HERE.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
+_PROJECT_ROOT = Path(__file__).parent.parent
 
 from minerva.domain.reports import (
     AcquisitionSummary,
@@ -47,82 +42,10 @@ from minerva_state import MinervaState
 # ── Test helpers ──────────────────────────────────────────────────────────
 
 
-def _build_test_index(path: str) -> None:
-    """Build a small test index with known files."""
-    import sqlite3
-
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA journal_mode = OFF")
-    conn.execute("PRAGMA synchronous = OFF")
-    conn.executescript(SCHEMA_V3)
-
-    # Insert test files
-    test_files = [
-        # (id, stem, basename, torrent, select_idx, size, path_full, collection, system)
-        (1, "super mario bros (world)", "Super Mario Bros (World).zip",
-         "test_torrent.torrent", 1, 102400, "Super Mario Bros (World).zip",
-         "Nintendo", "Nintendo - Nintendo Entertainment System"),
-        (2, "the legend of zelda (usa)", "The Legend of Zelda (USA).zip",
-         "test_torrent.torrent", 2, 204800, "The Legend of Zelda (USA).zip",
-         "Nintendo", "Nintendo - Nintendo Entertainment System"),
-        (3, "metroid (usa)", "Metroid (USA).zip",
-         "test_torrent.torrent", 3, 409600, "Metroid (USA).zip",
-         "Nintendo", "Nintendo - Nintendo Entertainment System"),
-        (4, "sonic the hedgehog (usa)", "Sonic the Hedgehog (USA).zip",
-         "test_torrent2.torrent", 1, 512000, "Sonic the Hedgehog (USA).zip",
-         "Sega", "Sega - Mega Drive - Genesis"),
-        (5, "game boy color bios", "Game Boy Color BIOS.bin",
-         "test_torrent3.torrent", 1, 0, "Game Boy Color BIOS.bin",
-         "Nintendo", "Nintendo - Game Boy Color"),
-        (6, "pokemon red (usa)", "Pokemon Red (USA).zip",
-         "test_torrent3.torrent", 2, 524288, "Pokemon Red (USA).zip",
-         "Nintendo", "Nintendo - Game Boy Color"),
-        (7, "pokemon blue (usa)", "Pokemon Blue (USA).zip",
-         "test_torrent3.torrent", 3, 524288, "Pokemon Blue (USA).zip",
-         "Nintendo", "Nintendo - Game Boy Color"),
-    ]
-
-    conn.executemany(
-        """INSERT INTO files (id, stem, basename, torrent, select_idx, size,
-                              path_full, collection, system)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        test_files,
-    )
-
-    # Insert torrent entries
-    conn.execute(
-        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
-        ("test_torrent.torrent", "Nintendo", "Nintendo - Nintendo Entertainment System", 3),
-    )
-    conn.execute(
-        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
-        ("test_torrent2.torrent", "Sega", "Sega - Mega Drive - Genesis", 1),
-    )
-    conn.execute(
-        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
-        ("test_torrent3.torrent", "Nintendo", "Nintendo - Game Boy Color", 3),
-    )
-
-    # Mark schema as v3
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3')",
-    )
-    conn.commit()
-    conn.close()
-
-
 @pytest.fixture
-def test_index(tmp_path):
-    """Create a small test index database."""
-    db_path = tmp_path / "test_index.db"
-    _build_test_index(str(db_path))
-    return db_path
-
-
-@pytest.fixture
-def test_db(test_index):
-    """Return a MinervaDB instance backed by the test index."""
-    return MinervaDB(db_path=test_index)
+def test_db(indexed_rom_db):
+    """Return a MinervaDB instance backed by the shared test index."""
+    return indexed_rom_db
 
 # ============================================================================
 # Fixtures
@@ -300,7 +223,7 @@ def test_import_report_prompts_for_scope_when_ambiguous(service, tmp_path):
     # Use a name that cannot match anything in the index (UUID + random suffix)
     import uuid
     weird_name = f"ZZ_{uuid.uuid4().hex}_nonexistent.bin"
-    csv = tmp_path / "unknown.csv"
+    csv = tmp_path / "zz_ambiguous_scope_test.csv"
     csv.write_text(f"name,size\n{weird_name},12345678\n", encoding="utf-8")
     with pytest.raises(ScopeInferenceRequired):
         service.import_report(csv)
@@ -617,6 +540,7 @@ def disambig_db(disambig_index):
 @pytest.fixture
 def disambig_service(tmp_state, disambig_db):
     """Service with romresolve policy for e2e disambiguation."""
+    pytest.importorskip("romresolve")
     policy = _make_test_policy()
     return ReportAcquisitionService(
         state=tmp_state,
@@ -744,3 +668,4 @@ def test_e2e_queue_ready_uses_injected_db(disambig_service, tmp_path):
     # queue_ready should work without error (it uses self._db internally)
     result = disambig_service.queue_ready(report.id)
     assert isinstance(result, QueueResult)
+

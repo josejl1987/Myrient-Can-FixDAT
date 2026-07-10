@@ -161,7 +161,7 @@ class NotificationBanner(QtWidgets.QFrame):
         # Close button
         self._close_btn = QtWidgets.QPushButton()
         self._close_btn.setObjectName("notificationClose")
-        self._close_btn.setIcon(Icons.error())  # reuse error icon as X
+        self._close_btn.setIcon(Icons.close())
         self._close_btn.setFixedSize(20, 20)
         self._close_btn.setFlat(True)
         self._close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
@@ -203,7 +203,7 @@ class NotificationBanner(QtWidgets.QFrame):
         fg, bg = _notification_colors(self._tokens, self._kind)
         self.setStyleSheet(
             f"NotificationBanner {{ background: {bg}; border: 1px solid {fg};"
-            f" border-radius: 8px; }}"
+            f" border-radius: {self._tokens.radius_md}; }}"
         )
 
     def _reposition(self) -> None:
@@ -278,6 +278,7 @@ class NotificationBanner(QtWidgets.QFrame):
 
     def apply_tokens(self, tokens: ThemeTokens) -> None:
         self._tokens = tokens
+        self._apply_background()
 
     def apply_density(self, density: Density) -> None:
         self._density = density

@@ -15,8 +15,8 @@ from minerva.ui.theme import ThemeTokens
 class SidebarRow(QtWidgets.QPushButton):
     """A single row in the sidebar — icon + label, wired to a QAction.
 
-    The row's active state is toggled by the ``active`` property and
-    rendered via dynamic stylesheet.
+    The row's active state is toggled by the ``active`` dynamic property,
+    which is styled via QSS selectors in ``base.qss``.
     """
 
     def __init__(
@@ -41,16 +41,16 @@ class SidebarRow(QtWidgets.QPushButton):
         self.setIconSize(QtCore.QSize(18, 18))
         self.setText(label)
         self.setObjectName("sidebarRow")
+        self.setProperty("active", False)
 
         # Wire click → action.trigger()
         self.clicked.connect(self._action.trigger)
 
-        self._update_style()
-
     def apply_tokens(self, tokens: ThemeTokens) -> None:
         """Refresh this row's palette after the global theme changes."""
         self._tokens = tokens
-        self._update_style()
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def apply_density(self, density: Density) -> None:
         """Refresh this row's height after the global density changes."""
@@ -67,34 +67,9 @@ class SidebarRow(QtWidgets.QPushButton):
 
     def set_active(self, active: bool) -> None:
         self._active = active
-        self._update_style()
-
-    def _update_style(self) -> None:
-        bg = self._tokens.surface if self._active else self._tokens.background
-        border = (
-            f"border-left: 3px solid {self._tokens.accent};"
-            if self._active
-            else "border-left: 3px solid transparent;"
-        )
-        color = self._tokens.accent if self._active else self._tokens.text
-
-        self.setStyleSheet(
-            f"QPushButton#sidebarRow {{"
-            f"  background-color: {bg};"
-            f"  {border}"
-            f"  color: {color};"
-            f"  text-align: left;"
-            f"  padding-left: 16px;"
-            f"  border-radius: 0;"
-            f"  font-size: 13px;"
-            f"  border-right: none;"
-            f"  border-top: none;"
-            f"  border-bottom: none;"
-            f"}}"
-            f"QPushButton#sidebarRow:hover {{"
-            f"  background-color: {self._tokens.surface};"
-            f"}}"
-        )
+        self.setProperty("active", active)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
 
 class AppSidebar(QtWidgets.QWidget):
@@ -134,24 +109,17 @@ class AppSidebar(QtWidgets.QWidget):
         layout.setSpacing(0)
 
         # ── Header label ────────────────────────────────────────────────
-        header = QtWidgets.QLabel("MINERVA")
-        header.setFixedHeight(48)
-        header.setStyleSheet(
-            f"color: {tokens.text};"
-            f"font-size: 11px;"
-            f"padding: 12px 8px 12px 16px;"
-            f"background-color: {tokens.background};"
-            f"font-weight: 600;"
-            f"letter-spacing: 1px;"
-        )
-        layout.addWidget(header)
+        self._header = QtWidgets.QLabel("MINERVA")
+        self._header.setObjectName("sidebarHeader")
+        self._header.setFixedHeight(48)
+        layout.addWidget(self._header)
 
         # ── Separator ────────────────────────────────────────────────────
-        sep = QtWidgets.QFrame()
-        sep.setFrameShape(QtWidgets.QFrame.Shape.HLine)
-        sep.setFixedHeight(1)
-        sep.setStyleSheet(f"background-color: {tokens.surface}; border: none;")
-        layout.addWidget(sep)
+        self._separator = QtWidgets.QFrame()
+        self._separator.setObjectName("sidebarSeparator")
+        self._separator.setFrameShape(QtWidgets.QFrame.Shape.HLine)
+        self._separator.setFixedHeight(1)
+        layout.addWidget(self._separator)
 
         # ── Sidebar rows (4 destinations) ────────────────────────────────
         icon_map = {
@@ -162,7 +130,7 @@ class AppSidebar(QtWidgets.QWidget):
         }
 
         label_map = {
-            PageId.REPORTS: "Fix Reports",
+            PageId.REPORTS: "Reports",
             PageId.LIBRARY: "Library",
             PageId.DOWNLOADS: "Downloads",
             PageId.SETTINGS: "Settings",
@@ -196,18 +164,10 @@ class AppSidebar(QtWidgets.QWidget):
 
         # ── Selection badge ───────────────────────────────────────────────
         self._selection_badge = QtWidgets.QLabel("", self)
-        self._selection_badge.setObjectName("selection_badge")
+        self._selection_badge.setObjectName("selectionBadge")
         self._selection_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._selection_badge.setFixedHeight(28)
-        self._selection_badge.setStyleSheet(
-            f"color: {tokens.text}; font-size: 11px; padding: 0 16px; opacity: 0.7;"
-        )
         layout.addWidget(self._selection_badge)
-
-        # Style the sidebar background
-        self.setStyleSheet(
-            f"QWidget#appSidebar {{ background-color: {tokens.background}; }}"
-        )
 
     # ── Selection badge ─────────────────────────────────────────────────
 
@@ -230,36 +190,10 @@ class AppSidebar(QtWidgets.QWidget):
     # ── Theme reactivity ───────────────────────────────────────────────
 
     def apply_tokens(self, tokens: ThemeTokens) -> None:
-        """Propagate new colour tokens to header, separator, badge, and rows."""
+        """Propagate new colour tokens to rows. QSS handles the rest."""
         self._tokens = tokens
-        self.setStyleSheet(
-            f"QWidget#appSidebar {{ background-color: {tokens.background}; }}"
-        )
-        for child in self.findChildren(QtWidgets.QWidget):
-            if isinstance(child, SidebarRow):
-                child.apply_tokens(tokens)
-            elif child.objectName() == "selection_badge":
-                child.setStyleSheet(
-                    f"color: {tokens.text}; font-size: 11px; padding: 0 16px; opacity: 0.7;"
-                )
-        # The header label has no objectName, so refresh by index.
-        layout = self.layout()
-        if layout is not None and layout.count() > 0:
-            header = layout.itemAt(0).widget()
-            if isinstance(header, QtWidgets.QLabel):
-                header.setStyleSheet(
-                    f"color: {tokens.text};"
-                    f"font-size: 11px;"
-                    f"padding: 12px 8px 12px 16px;"
-                    f"background-color: {tokens.background};"
-                    f"font-weight: 600;"
-                    f"letter-spacing: 1px;"
-                )
-            sep = layout.itemAt(1).widget()
-            if isinstance(sep, QtWidgets.QFrame):
-                sep.setStyleSheet(
-                    f"background-color: {tokens.surface}; border: none;"
-                )
+        for child in self.findChildren(SidebarRow):
+            child.apply_tokens(tokens)
 
     def apply_density(self, density: Density) -> None:
         """Propagate new density to every row."""

@@ -5,8 +5,9 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import libtorrent as lt
 import pytest
+
+lt = pytest.importorskip("libtorrent")
 
 from minerva.native_torrent import NativeTorrentSession
 
@@ -372,7 +373,6 @@ class TestStatusToDict:
 def _fill_status(status, **overrides):
     """Fill in fields _status_to_dict reads that _mock_status doesn't set."""
     from types import SimpleNamespace
-    import libtorrent as lt
     defaults = dict(
         state=lt.torrent_status.downloading,
         paused=False,

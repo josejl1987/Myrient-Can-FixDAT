@@ -26,13 +26,13 @@ class DownloadInspector(InspectorScaffold):
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__("Current task", parent=parent)
-        self.setMinimumWidth(310)
+        self.setMinimumWidth(340)
         self._record: DownloadRecord | None = None
 
         # ── Hero: cover + title/scope/torrent ───────────────────────────
         hero_row = QtWidgets.QHBoxLayout()
         hero_row.setSpacing(14)
-        self._cover = CoverLabel(76, 104)
+        self._cover = CoverLabel(64, 64)
         hero_row.addWidget(self._cover, 0, QtCore.Qt.AlignmentFlag.AlignTop)
 
         hero_text = QtWidgets.QVBoxLayout()
@@ -99,8 +99,18 @@ class DownloadInspector(InspectorScaffold):
         self._toggle_btn = self._make_button("Pause", Icons.pause(), "actionGroupSecondary")
         self._retry_btn = self._make_button("Retry", Icons.retry(), "actionGroupDestructive")
         self._remove_btn = self._make_button("Remove from queue", Icons.trash(), "actionGroupDestructive")
-        for button in (self._open_btn, self._toggle_btn, self._retry_btn, self._remove_btn):
-            self.actions_layout.addWidget(button)
+        primary_actions = QtWidgets.QHBoxLayout()
+        primary_actions.setSpacing(8)
+        primary_actions.addWidget(self._toggle_btn, 1)
+        primary_actions.addWidget(self._open_btn, 1)
+        self.actions_layout.addLayout(primary_actions)
+
+        secondary_actions = QtWidgets.QHBoxLayout()
+        secondary_actions.setSpacing(8)
+        secondary_actions.addWidget(self._retry_btn)
+        secondary_actions.addStretch(1)
+        secondary_actions.addWidget(self._remove_btn)
+        self.actions_layout.addLayout(secondary_actions)
 
         self._open_btn.clicked.connect(self._emit_open)
         self._toggle_btn.clicked.connect(self._emit_toggle)
@@ -145,8 +155,9 @@ class DownloadInspector(InspectorScaffold):
         scope = " \xb7 ".join(part for part in (record.collection, record.system) if part)
         self._scope.setText(scope or "Indexed file")
         self._torrent.setText(record.torrent_name or "Torrent not submitted yet")
-        self._status_badge.setText(record.status.value.replace("_", " ").title())
-        self._set_status_state(record.status.value)
+        status_value = record.status.value if hasattr(record.status, "value") else str(record.status)
+        self._status_badge.setText(status_value.replace("_", " ").title())
+        self._set_status_state(status_value)
         self._progress.setValue(max(0, min(100, int(record.progress * 100))))
         self._properties.set_rows([
             ("Download speed", format_speed(record.speed) if record.speed > 0 else "\u2014"),

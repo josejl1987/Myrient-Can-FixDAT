@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import logging
 import threading
+from typing import Any, Callable
 
 from PyQt6 import QtCore
+
+from minerva.ui.worker import Worker
 
 log = logging.getLogger(__name__)
 
@@ -24,6 +27,10 @@ class WorkerManager(QtCore.QObject):
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self.filter_load_thread: threading.Thread | None = None
+        # Worker-based filter load: wraps a callable in a Worker started
+        # on a QThread.  Cleared in _on_filter_load_worker_finished.
+        self.filter_load_worker: Worker | None = None
+        self._filter_load_qthread: QtCore.QThread | None = None
         # ponytail: download_worker holds a QThread-like worker (e.g. a
         # DownloadWorker) whose lifecycle outlives individual page swaps.
         # None when no worker has been attached.
@@ -38,6 +45,8 @@ class WorkerManager(QtCore.QObject):
             and self.filter_load_thread.is_alive()
         ):
             return True
+        if self.filter_load_worker is not None:
+            return True
         if self.download_worker is not None and self.download_worker.isRunning():
             return True
         return False
@@ -48,9 +57,38 @@ class WorkerManager(QtCore.QObject):
             and self.filter_load_thread.is_alive()
         ):
             self.filter_load_thread.join(timeout=timeout_ms / 1000)
+        if self.filter_load_worker is not None:
+            self.filter_load_worker.cancel()
+            if self._filter_load_qthread is not None:
+                self._filter_load_qthread.wait(timeout_ms)
+            self.filter_load_worker = None
+            self._filter_load_qthread = None
         if self.download_worker is not None and self.download_worker.isRunning():
             self.download_worker.stop()
         return not self.is_active()
+
+    # ── Worker-based filter load ────────────────────────────────────────
+
+    def start_filter_load(
+        self, fn: Callable[..., Any], *args: Any, **kwargs: Any
+    ) -> Worker:
+        """Wrap *fn* in a :class:`Worker`, start it on a QThread, and track it.
+
+        The worker's ``cancel_event`` is injected automatically if *fn*
+        declares a ``cancel_event`` parameter.  The slot is cleared when
+        the worker finishes via :meth:`_on_filter_load_worker_finished`.
+        """
+        worker = Worker(fn, *args, **kwargs)
+        worker.finished.connect(self._on_filter_load_worker_finished)
+        self.filter_load_worker = worker
+        self._filter_load_qthread = worker.start()
+        return worker
+
+    @QtCore.pyqtSlot()
+    def _on_filter_load_worker_finished(self) -> None:
+        """Clear the filter_load_worker slot when the worker finishes."""
+        self.filter_load_worker = None
+        self._filter_load_qthread = None
 
     # ── Download queue ──────────────────────────────────────────────────
 

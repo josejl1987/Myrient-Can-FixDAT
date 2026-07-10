@@ -15,6 +15,7 @@ This module is UI-agnostic. The GUI lives in `minerva_gui.py`.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import datetime
 import logging
@@ -84,302 +85,28 @@ def _ensure_parent_dir(db_path: str | Path) -> None:
         return
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
-# ── Pure-Python Bencode ──────────────────────────────────────────────────────
-def bdecode(data: bytes, idx: int = 0) -> tuple:
-    """Decode bencoded data. Returns (value, next_index)."""
-    c = data[idx:idx + 1]
-    if c == b'd':
-        idx += 1
-        d: dict = {}
-        while data[idx:idx + 1] != b'e':
-            k, idx = bdecode(data, idx)
-            v, idx = bdecode(data, idx)
-            d[k] = v
-        return d, idx + 1
-    if c == b'l':
-        idx += 1
-        lst: list = []
-        while data[idx:idx + 1] != b'e':
-            v, idx = bdecode(data, idx)
-            lst.append(v)
-        return lst, idx + 1
-    if c == b'i':
-        end = data.index(b'e', idx)
-        return int(data[idx + 1:end]), end + 1
-    colon = data.index(b':', idx)
-    n = int(data[idx:colon])
-    start = colon + 1
-    return data[start:start + n], start + n
+
+# Parsers moved to minerva.parsers package.
+# Re-exported here for backward compatibility.
+from minerva.parsers.torrent_bencode import bdecode, parse_torrent_files  # noqa: E402
+from minerva.parsers.dat_parser import (  # noqa: E402
+    COLLECTION_NO_INTRO,
+    COLLECTION_REDUMP,
+    COLLECTION_RETRO_ACHIEVEMENTS,
+    DatEntry,
+    DatInfo,
+    _clean_dat_system_name,
+    parse_dat_file,
+)
+from minerva.parsers.csv_parser import _is_fix_status, parse_rv_fix_csv  # noqa: E402
 
 
-def parse_torrent_files(path: Path) -> list[dict]:
-    """Parse a .torrent file → list of file records.
-
-    Returns: [{stem, basename, select_index, size, path_in_torrent}]
-    """
-    raw = path.read_bytes()
-    t, _ = bdecode(raw)
-    info = t.get(b'info', {})
-    result: list[dict] = []
-    if b'files' not in info:
-        name = info.get(b'name', b'').decode('utf-8', errors='replace')
-        length = info.get(b'length', 0) or 0
-        stem = re.sub(r'\.[^.]+$', '', name)
-        if stem:
-            result.append({
-                "stem": stem, "basename": name, "select_index": 1,
-                "size": length, "path_in_torrent": name,
-            })
-        return result
-    idx = 1
-    for f in info[b'files']:
-        full = b'/'.join(f[b'path']).decode('utf-8', errors='replace')
-        length = f.get(b'length', 0) or 0
-        # Skip BEP 47 pad files
-        if full.startswith('.pad/') or '/.pad/' in full:
-            idx += 1
-            continue
-        basename = full.rsplit('/', 1)[-1]
-        if not basename:
-            idx += 1
-            continue
-        stem = re.sub(r'\.[^.]+$', '', basename)
-        if stem:
-            result.append({
-                "stem": stem, "basename": basename, "select_index": idx,
-                "size": length, "path_in_torrent": full,
-            })
-        idx += 1
-    return result
 
 
-# ── DAT file parser ───────────────────────────────────────────────────────────
-COLLECTION_NO_INTRO = "No-Intro"
-COLLECTION_REDUMP = "Redump"
-COLLECTION_RETRO_ACHIEVEMENTS = "RetroAchievements"
 
 
-@dataclass(frozen=True)
-class DatEntry:
-    """A single rom entry from a DAT file."""
-    filename: str
-    size: int
 
 
-@dataclass(frozen=True)
-class DatInfo:
-    """Parsed DAT file metadata and entries."""
-    entries: tuple[DatEntry, ...]
-    name: str | None
-    collection: str | None
-    system: str | None
-
-
-def parse_dat_file(path: Path) -> DatInfo:
-    """Parse a No-Intro / Redump / RetroAchievements DAT XML file.
-
-    Args:
-        path: Path to the .dat file.
-
-    Returns:
-        DatInfo with entries and inferred metadata.
-
-    Raises:
-        FileNotFoundError: If path doesn't exist.
-        ET.ParseError: If the file isn't valid XML.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"DAT file not found: {path}")
-
-    tree = ET.parse(path)
-    root = tree.getroot()
-    header = root.find("header")
-
-    dat_name: str | None = None
-    collection: str | None = None
-    system: str | None = None
-    clean_dat_name: str | None = None
-    clean_path_name: str | None = _clean_dat_system_name(path.stem)
-
-    if header is not None:
-        name_elem = header.find("name")
-        if name_elem is not None and name_elem.text:
-            dat_name = name_elem.text.strip()
-            clean_dat_name = _clean_dat_system_name(dat_name)
-
-        # Infer collection from URL
-        url_elem = header.find("url")
-        if url_elem is not None and url_elem.text:
-            dat_url = url_elem.text.strip().lower()
-            if "redump.org" in dat_url:
-                collection = COLLECTION_REDUMP
-                system = clean_dat_name or clean_path_name or dat_name
-            elif "no-intro.org" in dat_url or "no-intro" in dat_url:
-                collection = COLLECTION_NO_INTRO
-                system = clean_dat_name or clean_path_name or dat_name
-            elif "retroachievements.org" in dat_url:
-                collection = COLLECTION_RETRO_ACHIEVEMENTS
-                system = clean_dat_name or clean_path_name or dat_name
-
-        # RA detection by homepage
-        homepage_elem = header.find("homepage")
-        if homepage_elem is not None and homepage_elem.text:
-            if "retroachievements.org" in homepage_elem.text.strip().lower():
-                collection = COLLECTION_RETRO_ACHIEVEMENTS
-                system = clean_dat_name or clean_path_name or dat_name
-
-        # Fallback from dat_name
-        if collection is None and dat_name:
-            lower = dat_name.lower()
-            if "no-intro" in lower or "no intro" in lower:
-                collection = COLLECTION_NO_INTRO
-            elif "redump" in lower:
-                collection = COLLECTION_REDUMP
-            elif "retroachievements" in lower or "ra - " in lower:
-                collection = COLLECTION_RETRO_ACHIEVEMENTS
-
-        if system is None:
-            system = clean_dat_name or clean_path_name or dat_name
-
-    entries: list[DatEntry] = []
-    for game in root.iter("game"):
-        for rom in game.iter("rom"):
-            fname = (rom.get("name") or "").strip()
-            size_str = (rom.get("size") or "").strip()
-            if fname:
-                try:
-                    size = int(size_str) if size_str else 0
-                except ValueError:
-                    size = 0
-                entries.append(DatEntry(filename=fname, size=size))
-
-    return DatInfo(
-        entries=tuple(entries),
-        name=dat_name,
-        collection=collection,
-        system=system,
-    )
-
-
-# ── RomVault CSV parser ──────────────────────────────────────────────────────
-_RV_NAME_COLS = frozenset({"name", "game", "file", "filename", "rom", "title"})
-_RV_STATUS_COLS = frozenset({"status", "result", "fix", "state"})
-_RV_SIZE_COLS = frozenset({"size", "bytes", "length", "filesize"})
-
-
-def parse_rv_fix_csv(path: Path) -> DatInfo:
-    """Parse a RomVault CSV fix report.
-
-    Auto-detects column layout from header row and filters to
-    entries that need fixing (status == Missing, Fix, etc.).
-
-    Args:
-        path: Path to the .csv file.
-
-    Returns:
-        DatInfo with extracted rom entries.
-    """
-    text = path.read_text(encoding="utf-8", errors="replace")
-    lines = [line for line in text.split("\n") if line.strip()]
-    if not lines:
-        return DatInfo(entries=(), name=path.stem, collection=None, system=None)
-
-    header = lines[0]
-    try:
-        sniffer = csv.Sniffer()
-        dialect = sniffer.sniff(header)
-        has_header = sniffer.has_header(header)
-    except csv.Error:
-        dialect = csv.excel
-        has_header = False
-
-    reader = csv.reader(lines, dialect=dialect)
-    rows = list(reader)
-
-    if has_header:
-        cols = rows[0]
-        data_rows = rows[1:]
-    else:
-        cols = []
-        data_rows = rows
-
-    # Find column indices
-    name_idx = -1
-    status_idx = -1
-    sz_idx = -1
-    for i, c in enumerate(cols):
-        cl = c.strip().lower()
-        if cl in _RV_NAME_COLS:
-            name_idx = i
-        elif cl in _RV_STATUS_COLS:
-            status_idx = i
-        elif cl in _RV_SIZE_COLS:
-            sz_idx = i
-
-    entries: list[DatEntry] = []
-    for row in data_rows:
-        if not row:
-            continue
-
-        # Filter by status if status column is present
-        if status_idx >= 0 and status_idx < len(row):
-            status = row[status_idx].strip().lower()
-            if status and not _is_fix_status(status):
-                continue
-
-        # Extract filename
-        fname = ""
-        if name_idx >= 0 and name_idx < len(row):
-            fname = row[name_idx].strip()
-        elif not cols and row:
-            fname = row[0].strip()
-
-        if not fname:
-            continue
-        fname = fname.strip('"\' \t')
-        if not fname or fname.startswith("#") or fname.startswith("//"):
-            continue
-
-        # Handle unquoted commas inside parens (re-merge split columns)
-        local_sz = sz_idx
-        if "(" in fname:
-            merges = 0
-            paren_diff = fname.count("(") - fname.count(")")
-            merge_from = name_idx + 1 if name_idx >= 0 else 1
-            while paren_diff > 0 and merge_from < len(row):
-                fname += "," + row[merge_from]
-                paren_diff = fname.count("(") - fname.count(")")
-                merge_from += 1
-                merges += 1
-            if merges and local_sz >= 0 and local_sz > name_idx:
-                local_sz += merges
-
-        # Extract size
-        size = 0
-        if local_sz is not None and local_sz >= 0 and local_sz < len(row):
-            try:
-                size = int(row[local_sz].strip())
-            except ValueError:
-                size = 0
-
-        entries.append(DatEntry(filename=fname, size=size))
-
-    return DatInfo(
-        entries=tuple(entries),
-        name=path.stem,
-        collection=None,
-        system=None,
-    )
-
-
-def _is_fix_status(status: str) -> bool:
-    """Return True if the status indicates a file that needs fixing."""
-    status = status.lower()
-    fix_markers = (
-        "missing", "not found", "fix", "mismatch",
-        "bad", "wrong", "incomplete", "incorrect", "size", "crc",
-    )
-    return any(marker in status for marker in fix_markers)
 
 
 # ── Title normalization & matching ──────────────────────────────────────────
@@ -443,57 +170,13 @@ def stem_from_romname(name: str) -> str:
     return re.sub(r"\.[^.]+$", "", name).lower()
 
 
-def _clean_dat_system_name(label: str | None) -> str | None:
-    """Normalize DAT labels into a usable system name.
-
-    Strips common fixDat prefixes and trailing metadata such as retool tags,
-    release labels, and date stamps.
-    """
-    if not label:
-        return None
-
-    cleaned = label.strip()
-    cleaned = _DAT_PREFIX.sub("", cleaned)
-
-    while True:
-        new = _DAT_DATE_SUFFIX.sub("", cleaned)
-        new = _DAT_META_SUFFIX.sub("", new)
-        new = new.strip()
-        if new == cleaned:
-            break
-        cleaned = new
-
-    cleaned = cleaned.strip(" _-")
-    return cleaned or None
 
 
-def core_title(stem: str) -> str:
-    """Extract the title core: strip parens, punctuation, normalize articles.
 
-    Examples:
-        'the legend of zelda, the - link\\'s awakening dx (usa, europe)'
-          → 'legend of zelda the links awakening dx'
-        'super mario bros. deluxe (usa, europe)'
-          → 'super mario bros deluxe'
-    """
-    s = _PAREN_STRIP.sub("", stem).strip()
-    s = _BROS.sub("bros", s)
-    s = _PUNCT.sub("", s)
-    s = re.sub(r"\s+", " ", s).strip().lower()
-    # Normalize "The" placement
-    if s.startswith("the "):
-        s = s[4:] + " the"
-    s = re.sub(r", the$", " the", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    s = s.replace(" & ", " and ")
-    return s
-
-
-def title_keywords(stem: str) -> set[str]:
-    """Extract significant keyword set from a stem (no parens, no stopwords)."""
-    core = core_title(stem)
-    words = set(re.findall(r"[a-z0-9]+", core))
-    return {w for w in words if len(w) >= MIN_KEYWORD_LEN and w not in _STOPWORDS}
+# core_title and title_keywords moved to minerva.matching.scoring.
+# Re-exported here for backward compatibility with callers importing
+# from minerva_db (e.g. report_acquisition.py, tests).
+from minerva.matching.scoring import core_title, title_keywords  # noqa: E402
 
 
 def fts_escape(term: str) -> str:
@@ -1019,6 +702,7 @@ class StemSizeMatch:
     system: str
     basename: str
     size: int
+    path_full: str = ""
 
 
 @dataclass
@@ -1067,6 +751,15 @@ class MinervaDB:
         if _connect:
             self.connect()
 
+    @property
+    def ready(self) -> bool:
+        """True if the index DB has a valid schema and files table."""
+        return self._ready
+
+    @property
+    def path(self) -> str:
+        """The filesystem path of the index database this instance was opened with."""
+        return self._path
     @classmethod
     def open(
         cls,
@@ -1090,16 +783,30 @@ class MinervaDB:
         self._validate_schema()
         log.debug("MinervaDB initialized: %s", self._path)
 
+    @contextlib.contextmanager
     def conn(self) -> sqlite3.Connection:
-        """Open a new connection. Caller is responsible for closing."""
+        """Open a new connection as a context manager.
+
+        Yields a connection that is committed on clean exit, rolled back
+        on exception, and always closed — preventing the connection leak
+        that ``with sqlite3.connect() as c:`` causes (its ``__exit__``
+        only commits/rolls back, never closes).
+        """
         _ensure_parent_dir(self._path)
         c = sqlite3.connect(self._path)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA busy_timeout = 5000")
-        c.execute("PRAGMA mmap_size = 268435456")
-        c.execute("PRAGMA temp_store = MEMORY")
-        c.execute("PRAGMA cache_size = -8000000")
-        return c
+        try:
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA busy_timeout = 5000")
+            c.execute("PRAGMA mmap_size = 268435456")
+            c.execute("PRAGMA temp_store = MEMORY")
+            c.execute("PRAGMA cache_size = -64000")
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
 
     def _validate_schema(self) -> None:
         """Verify the database is at the expected schema version and migrate if needed."""
@@ -1592,6 +1299,9 @@ class MinervaDB:
         torrent_dir: Path = DEFAULT_TORRENT_DIR,
     ) -> "DownloadFileSpec | None":
         """Resolve a file ID into all metadata needed by the downloader."""
+        if not self._ready:
+            log.warning("get_download_spec: index DB not ready at %s", self._path)
+            return None
         if not _HAS_DOMAIN:
             raise RuntimeError("Domain types not available")
         with self.conn() as c:
@@ -2195,8 +1905,9 @@ class MinervaDB:
                 entry_stem = stem_from_romname(entry.filename)
                 entry_size = entry.size
 
-                # Collect candidates from all tiers (deduplicated by id)
-                seen_ids: set[int] = set()
+                # Collect candidates from all tiers (deduplicated by id,
+                # preserving insertion order via dict for deterministic ranking).
+                seen_ids: dict[int, str] = {}  # id → tier_source
                 tier_sources: dict[int, str] = {}
 
                 # Tier 1: exact stem
@@ -2205,42 +1916,46 @@ class MinervaDB:
                 )
                 for r in tier1:
                     if r["id"] not in seen_ids:
-                        seen_ids.add(r["id"])
+                        seen_ids[r["id"]] = "exact"
                         tier_sources[r["id"]] = "exact"
 
                 # Tier 2: FTS5
-                if len(seen_ids) < candidate_limit:
-                    tier2 = self._find_by_fts(
-                        entry_stem, collection, system, conn, size=entry_size
-                    )
-                    for r in tier2:
-                        if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                            seen_ids.add(r["id"])
-                            tier_sources[r["id"]] = "fuzzy"
+                tier2 = self._find_by_fts(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier2:
+                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                        seen_ids[r["id"]] = "fts5"
+                        tier_sources[r["id"]] = "fts5"
 
                 # Tier 3: trigram
-                if len(seen_ids) < candidate_limit:
-                    tier3 = self._find_by_trigram(
-                        entry_stem, collection, system, conn, size=entry_size
-                    )
-                    for r in tier3:
-                        if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                            seen_ids.add(r["id"])
-                            tier_sources[r["id"]] = "fuzzy"
+                tier3 = self._find_by_trigram(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier3:
+                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                        seen_ids[r["id"]] = "trigram"
+                        tier_sources[r["id"]] = "trigram"
 
                 # Tier 4: keywords
-                if len(seen_ids) < candidate_limit:
-                    tier4 = self._find_by_keywords(
-                        entry_stem, collection, system, conn, size=entry_size
-                    )
-                    for r in tier4:
-                        if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                            seen_ids.add(r["id"])
-                            tier_sources[r["id"]] = "fuzzy"
+                tier4 = self._find_by_keywords(
+                    entry_stem, collection, system, conn, size=entry_size
+                )
+                for r in tier4:
+                    if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                        seen_ids[r["id"]] = "keyword"
+                        tier_sources[r["id"]] = "keyword"
 
-                # Score and build candidate list
+                # Rank ALL candidates before truncation (P1-3 fix).
+                tier_priority = {"exact": 0, "fts5": 1, "trigram": 2, "keyword": 3}
+                ranked_ids = sorted(
+                    seen_ids.keys(),
+                    key=lambda cid: tier_priority.get(tier_sources.get(cid, "keyword"), 99),
+                )
+
+                # Score ALL candidates before truncation (P1-3 fix).
                 scored: list[dict] = []
-                for cand_id in list(seen_ids)[:candidate_limit]:
+                for cand_id in ranked_ids:
                     # Fetch the full row to score it
                     cand_row = conn.execute(
                         "SELECT * FROM files WHERE id = ?", (cand_id,)
@@ -2260,8 +1975,17 @@ class MinervaDB:
                         "reasons": reasons,
                     })
 
-                # Sort by confidence descending
-                scored.sort(key=lambda x: -x["confidence"])
+                # Sort by confidence descending, then tier priority, then
+                # exact size match, then file_id for deterministic ordering.
+                scored.sort(key=lambda x: (
+                    -x["confidence"],
+                    tier_priority.get(x.get("method", "keyword"), 99),
+                    0 if x["size"] == entry_size else 1,
+                    x["file_id"],
+                ))
+
+                # Truncate AFTER scoring and sorting
+                scored = scored[:candidate_limit]
 
                 # Best candidate for automatic suggestion
                 if scored:
@@ -2344,42 +2068,39 @@ class MinervaDB:
         system: str,
         conn: sqlite3.Connection,
     ) -> tuple[dict | None, dict | None]:
-        seen_ids: set[int] = set()
+        seen_ids: dict[int, str] = {}  # id → tier_source (ordered)
         tier_sources: dict[int, str] = {}
 
-        # Tier 1: exact stem — no candidate_limit here, we want T1 completely
+        # Tier 1: exact stem
         tier1 = self._find_by_stem(entry_stem, collection, system, conn, size=entry_size)
         for r in tier1:
             if r["id"] not in seen_ids:
-                seen_ids.add(r["id"])
+                seen_ids[r["id"]] = "exact"
                 tier_sources[r["id"]] = "exact"
 
-        # Tier 2: FTS5 — skip if tier 1 already found 2+ exact matches
-        if len(seen_ids) < 2:
-            tier2 = self._find_by_fts(entry_stem, collection, system, conn, size=entry_size)
-            for r in tier2:
-                if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                    seen_ids.add(r["id"])
-                    if r["id"] not in tier_sources:
-                        tier_sources[r["id"]] = "fuzzy"
+        # Tier 2: FTS5 — collect all, don't truncate at 2
+        tier2 = self._find_by_fts(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier2:
+            if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                seen_ids[r["id"]] = "fts5"
+                if r["id"] not in tier_sources:
+                    tier_sources[r["id"]] = "fts5"
 
-        # Tier 3: trigram — skip if we already have 2+ candidates
-        if len(seen_ids) < 2:
-            tier3 = self._find_by_trigram(entry_stem, collection, system, conn, size=entry_size)
-            for r in tier3:
-                if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                    seen_ids.add(r["id"])
-                    if r["id"] not in tier_sources:
-                        tier_sources[r["id"]] = "fuzzy"
+        # Tier 3: trigram
+        tier3 = self._find_by_trigram(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier3:
+            if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                seen_ids[r["id"]] = "trigram"
+                if r["id"] not in tier_sources:
+                    tier_sources[r["id"]] = "trigram"
 
-        # Tier 4: keywords — but only if we have fewer than 2 candidates
-        if len(seen_ids) < 2:
-            tier4 = self._find_by_keywords(entry_stem, collection, system, conn, size=entry_size)
-            for r in tier4:
-                if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
-                    seen_ids.add(r["id"])
-                    if r["id"] not in tier_sources:
-                        tier_sources[r["id"]] = "fuzzy"
+        # Tier 4: keywords
+        tier4 = self._find_by_keywords(entry_stem, collection, system, conn, size=entry_size)
+        for r in tier4:
+            if r["id"] not in seen_ids and stems_match(entry_stem, r["stem"]):
+                seen_ids[r["id"]] = "keyword"
+                if r["id"] not in tier_sources:
+                    tier_sources[r["id"]] = "keyword"
 
         # Score all candidates
         scored: list[dict] = []
@@ -2404,7 +2125,14 @@ class MinervaDB:
                 "reasons": reasons,
             })
 
-        scored.sort(key=lambda x: -x["confidence"])
+        # Deterministic sort: confidence, tier, size match, file_id
+        tier_priority = {"exact": 0, "fts5": 1, "trigram": 2, "keyword": 3, "fuzzy": 1}
+        scored.sort(key=lambda x: (
+            -x["confidence"],
+            tier_priority.get(x.get("method", "fuzzy"), 99),
+            0 if x["size"] == entry_size else 1,
+            x["file_id"],
+        ))
         if not scored:
             return None, None
         best = scored[0]
@@ -2415,78 +2143,19 @@ class MinervaDB:
     def _score_candidate(
         entry_stem: str, entry_size: int,
         candidate: sqlite3.Row,
-        collection: str = "",
-        system: str = "",
+        collection: str = "", system: str = "",
     ) -> tuple[float, list[str]]:
-        """Score a single candidate and return (confidence, reasons).
+        """Score a single candidate. Delegates to the shared scoring module.
 
-        Scoring formula (deterministic, clamped to [0, 1]):
-            - Exact stem: 1.00
-            - Exact normalized core title: 0.96
-            - Strong keyword overlap (>=80%): 0.95
-            - Moderate keyword overlap (>=50%): 0.85
-            - Weak keyword overlap: 0.70
-            - No keywords possible: 0.50
-            - Matching non-zero size: +0.03
-            - Collection and system both match: +0.02
-            - Conflicting non-zero size (>10% diff): -0.08
-            - Cross-system/cross-collection fallback: -0.15
+        See :func:`minerva.matching.scoring.score_candidate` for the formula.
         """
-        reasons: list[str] = []
-        cand_stem = candidate["stem"]
-        cand_size = candidate["size"]
-
-        # ── Title similarity ──
-        if entry_stem == cand_stem:
-            reasons.append("Exact stem match")
-            confidence = 1.0
-        else:
-            entry_core = core_title(entry_stem)
-            cand_core = core_title(cand_stem)
-            if entry_core == cand_core:
-                reasons.append(f"Core title match: '{entry_core}'")
-                confidence = 0.96
-            else:
-                entry_kw = title_keywords(entry_stem)
-                cand_kw = title_keywords(cand_stem)
-                if entry_kw and cand_kw:
-                    overlap = entry_kw & cand_kw
-                    overlap_ratio = len(overlap) / max(len(entry_kw), len(cand_kw))
-                    if overlap_ratio >= 0.8:
-                        reasons.append(f"Strong keyword overlap ({overlap_ratio:.0%})")
-                        confidence = 0.95
-                    elif overlap_ratio >= 0.5:
-                        reasons.append(f"Moderate keyword overlap ({overlap_ratio:.0%})")
-                        confidence = 0.85
-                    else:
-                        reasons.append(f"Weak keyword overlap ({overlap_ratio:.0%})")
-                        confidence = 0.70
-                else:
-                    reasons.append("No keyword overlap possible")
-                    confidence = 0.50
-
-        # ── Size adjustments ──
-        if entry_size > 0 and cand_size > 0:
-            if entry_size == cand_size:
-                reasons.append("Exact size match")
-                confidence += 0.03
-            else:
-                ratio = abs(entry_size - cand_size) / max(entry_size, cand_size)
-                if ratio > 0.10:
-                    reasons.append(f"Size mismatch ({entry_size} vs {cand_size})")
-                    confidence -= 0.08
-
-        # ── Collection / system consistency ──
-        coll_match = (not collection or candidate["collection"] == collection)
-        sys_match = (not system or candidate["system"] == system)
-        if coll_match and sys_match:
-            reasons.append("Collection & system match")
-            confidence += 0.02
-        elif not sys_match and not coll_match:
-            reasons.append("Cross-system/cross-collection fallback")
-            confidence -= 0.15
-
-        return max(0.0, min(1.0, confidence)), reasons
+        from minerva.matching.scoring import score_candidate
+        return score_candidate(
+            entry_stem, entry_size,
+            candidate["stem"], candidate["size"],
+            candidate["collection"], candidate["system"],
+            collection, system,
+        )
 
     def find_file_id_by_stem_and_size(
         self,
@@ -2507,19 +2176,17 @@ class MinervaDB:
             where_parts.append("system = ?")
             params.append(system)
         where = " AND ".join(where_parts)
-
         with self.conn() as c:
             rows = c.execute(
-                f"SELECT id, collection, system, basename, size FROM files WHERE {where}",
+                f"SELECT id, collection, system, basename, size, path_full FROM files WHERE {where}",
                 params,
             ).fetchall()
-
         if not rows:
             return None
         matches = [
             StemSizeMatch(
                 file_id=r["id"], collection=r["collection"], system=r["system"],
-                basename=r["basename"], size=r["size"],
+                basename=r["basename"], size=r["size"], path_full=r["path_full"],
             ) for r in rows
         ]
         return matches[0] if len(matches) == 1 else matches

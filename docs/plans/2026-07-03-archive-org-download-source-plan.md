@@ -4,7 +4,7 @@
 
 **Goal:** Add archive.org as a parallel download source in the match review screen, with torrent-or-HTTP download routing, using the official `internetarchive` Python library.
 
-**Architecture:** Introduce a `CandidateProvider` protocol that abstracts candidate search. The existing `match_dat_detailed()` becomes the Minerva provider; a new `ArchiveOrgCandidateProvider` uses `internetarchive.search_items` / `get_item`. `QueueRecord` gains `source` + `source_ref` fields (schema migration). `DownloadController._schedule_record_submission` dispatches by source: Minerva torrent (existing path), archive.org torrent (fetch .torrent → qBittorrent), or archive.org HTTP (streaming download adapter).
+**Architecture:** Introduce a `CandidateProvider` protocol that abstracts candidate search. The existing `match_dat_detailed()` becomes the Minerva provider; a new `ArchiveOrgCandidateProvider` uses `internetarchive.search_items` / `get_item`. `QueueRecord` gains `source` + `source_ref` fields (schema migration). `DownloadController._schedule_record_submission` dispatches by source: Minerva torrent (existing path), archive.org torrent (fetch .torrent → external torrent client), or archive.org HTTP (streaming download adapter).
 
 **Tech Stack:** Python 3.10+, PyQt6, `internetarchive` 5.10.1, `requests`, SQLite
 
@@ -194,7 +194,7 @@ def test_legacy_db_gets_source_columns(tmp_path):
             CREATE TABLE IF NOT EXISTS download_queue (
                 id TEXT PRIMARY KEY, file_id INTEGER NOT NULL,
                 report_entry_id TEXT, status TEXT NOT NULL DEFAULT 'queued',
-                qbit_hash TEXT, destination TEXT NOT NULL, error TEXT,
+                torrent_hash TEXT, destination TEXT NOT NULL, error TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS activity_events (
@@ -270,7 +270,7 @@ In `minerva_state.py`, update `QUEUE_COLUMNS` (line 63-66):
 
 ```python
 QUEUE_COLUMNS = frozenset({
-    "file_id", "report_entry_id", "status", "qbit_hash",
+    "file_id", "report_entry_id", "status", "torrent_hash",
     "destination", "error", "created_at", "updated_at",
     "source", "source_ref",
 })
@@ -288,7 +288,7 @@ In `minerva_state.py`, update `_row_to_queue_record` (around line 239) to includ
         report_id=_col("report_id", report_id),
         report_name=_col("report_name", report_name),
         status=row["status"],
-        qbit_hash=row["qbit_hash"],
+        torrent_hash=row["torrent_hash"],
         destination=row["destination"],
         error=row["error"],
         created_at=row["created_at"],
@@ -308,7 +308,7 @@ CREATE TABLE IF NOT EXISTS download_queue (
     file_id INTEGER NOT NULL,
     report_entry_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
-    qbit_hash TEXT,
+    torrent_hash TEXT,
     destination TEXT NOT NULL,
     error TEXT,
     created_at TEXT NOT NULL,
@@ -361,7 +361,7 @@ In `minerva_state.py`, update `save_queue_record` (line 748-767) to include sour
             c.execute(
                 """
                 INSERT INTO download_queue
-                    (id, file_id, report_entry_id, status, qbit_hash,
+                    (id, file_id, report_entry_id, status, torrent_hash,
                      destination, error, created_at, updated_at,
                      source, source_ref)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -371,7 +371,7 @@ In `minerva_state.py`, update `save_queue_record` (line 748-767) to include sour
                     record.file_id,
                     record.report_entry_id,
                     record.status,
-                    record.qbit_hash,
+                    record.torrent_hash,
                     record.destination,
                     record.error,
                     record.created_at,
@@ -388,7 +388,7 @@ Do the same for `save_queue_records_batch` (line 779-796):
         rows = [
             (
                 r.id, r.file_id, r.report_entry_id, r.status,
-                r.qbit_hash, r.destination, r.error,
+                r.torrent_hash, r.destination, r.error,
                 r.created_at, r.updated_at,
                 r.source, r.source_ref,
             )
@@ -398,7 +398,7 @@ Do the same for `save_queue_records_batch` (line 779-796):
             c.executemany(
                 """
                 INSERT INTO download_queue
-                    (id, file_id, report_entry_id, status, qbit_hash,
+                    (id, file_id, report_entry_id, status, torrent_hash,
                      destination, error, created_at, updated_at,
                      source, source_ref)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1249,7 +1249,7 @@ Add after `_submit_torrent_group` (around line 817), before the completion secti
     # ── Archive.org torrent download ────────────────────────────────────
 
     def _submit_archive_org_torrent(self, record: QueueRecord) -> None:
-        """Download via archive.org's torrent file using qBittorrent."""
+        """Download via archive.org's torrent file using external torrent client."""
         if not record.source_ref:
             self._state.update_queue_record(
                 record.id,
@@ -1292,10 +1292,10 @@ Add after `_submit_torrent_group` (around line 817), before the completion secti
                 tf.write(response.content)
                 torrent_path = Path(tf.name)
 
-            # Add to qBittorrent
+            # Add to external torrent client
             torrent_hash = client.add_torrent_paused(str(torrent_path), str(self._seed_dir))
             if not torrent_hash:
-                raise QBittorrentError("qBittorrent accepted the torrent but no hash was found")
+                raise external torrent clientError("external torrent client accepted the torrent but no hash was found")
 
             # Find the target file index
             files = client.get_files(torrent_hash)
@@ -1325,7 +1325,7 @@ Add after `_submit_torrent_group` (around line 817), before the completion secti
             client.set_file_priority(torrent_hash, [target_index], 1)
             client.resume(torrent_hash)
 
-            # Clean up temp torrent file — qBittorrent has its own copy
+            # Clean up temp torrent file — external torrent client has its own copy
             try:
                 torrent_path.unlink()
             except OSError:
@@ -1339,7 +1339,7 @@ Add after `_submit_torrent_group` (around line 817), before the completion secti
             self._state.update_queue_record(
                 record.id,
                 status=DownloadStatus.DOWNLOADING.value,
-                qbit_hash=torrent_hash,
+                torrent_hash=torrent_hash,
                 error=None,
             )
             self._state.add_event(

@@ -1,27 +1,50 @@
-/* Downloads reference screen ------------------------------------------------ */
+/* Downloads page ────────────────────────────────────────────────── */
 
 QWidget#downloadsPage {
     background: {{token.background}};
 }
 
-QFrame#downloadConnectionBanner {
-    background: {{token.error_bg}};
-    border: 1px solid {{token.error}};
+
+/* ── Compact operational status strip ─────────────────────────── */
+
+QFrame#downloadStatusStrip {
+    min-height: 42px;
+    max-height: 42px;
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
     border-radius: {{token.radius_lg}};
 }
 
-QFrame#downloadConnectionBanner[connected="true"] {
+QLabel#downloadSessionState {
+    color: {{token.success}};
+    font-weight: 600;
+}
+
+QLabel#downloadStatusMetric {
+    color: {{token.text_muted}};
+    font-weight: 600;
+    padding: 2px 0;
+}
+
+QLabel#downloadStatusMetric[kind="active"] {
+    color: {{token.text}};
+}
+
+QLabel#downloadStatusMetric[kind="failed"] {
+    color: {{token.error}};
+}
+
+/* ── Connection banner (native session, always connected) ──────── */
+
+QFrame#downloadConnectionBanner {
     background: {{token.success_bg}};
-    border-color: {{token.success}};
+    border: 1px solid {{token.success}};
+    border-radius: {{token.radius_lg}};
 }
 
 QLabel#downloadConnectionDot {
-    color: {{token.error}};
-    font-size: 14px;
-}
-
-QFrame#downloadConnectionBanner[connected="true"] QLabel#downloadConnectionDot {
     color: {{token.success}};
+    font-size: 14px;
 }
 
 QLabel#downloadConnectionText {
@@ -29,14 +52,16 @@ QLabel#downloadConnectionText {
     font-weight: 600;
 }
 
+/* ── Surface panels ────────────────────────────────────────────── */
+
 QFrame#downloadPanel,
-QFrame#downloadInspector,
-QFrame#throughputPanel,
-QFrame#downloadActivityPanel {
+QFrame#downloadInspector {
     background: {{token.surface}};
     border: 1px solid {{token.border}};
     border-radius: {{token.radius_lg}};
 }
+
+/* ── Toolbar ───────────────────────────────────────────────────── */
 
 QFrame#downloadToolbar {
     background: transparent;
@@ -56,36 +81,41 @@ QLineEdit#downloadSearch:focus {
     border: 2px solid {{token.accent}};
 }
 
-QTableView#downloadsTable {
+/* ── Tree view ─────────────────────────────────────────────────── */
+
+QTreeView#downloadsTable {
     background: {{token.surface}};
-    alternate-background-color: {{token.background}};
+    alternate-background-color: #151E2D;
     border: none;
-    gridline-color: transparent;
-    selection-background-color: {{token.info_bg}};
+    outline: none;
+    selection-background-color: #24334A;
     selection-color: {{token.text}};
 }
 
-QTableView#downloadsTable::item {
+QTreeView#downloadsTable::item {
+    min-height: 34px;
     padding: 4px 8px;
-    border-bottom: 1px solid {{token.border}};
+    border-bottom: 1px solid #1E2A3A;
 }
 
-QTableView#downloadsTable::item:hover {
+QTreeView#downloadsTable::item:hover {
     background: {{token.surface_raised}};
 }
 
-QTableView#downloadsTable QHeaderView::section {
-    min-height: 34px;
+QTreeView#downloadsTable QHeaderView::section {
+    min-height: 32px;
     background: {{token.surface_raised}};
     border: none;
-    border-bottom: 1px solid {{token.border}};
+    border-bottom: 1px solid transparent;
     padding: 0 8px;
 }
+
+/* ── Summary bar ───────────────────────────────────────────────── */
 
 QFrame#downloadSummaryBar {
     background: {{token.surface_raised}};
     border: none;
-    border-top: 1px solid {{token.border}};
+    border-top: 1px solid #1E2D3D;
 }
 
 QLabel#downloadSummaryText {
@@ -103,13 +133,16 @@ QLabel#chartPeak {
     color: {{token.text_muted}};
 }
 
-QLabel#panelTitle,
-QLabel#inspectorSectionTitle {
+/* ── Section / panel titles ────────────────────────────────────── */
+
+QLabel#panelTitle {
     font-family: "{{token.body_font}}";
     color: {{token.text}};
     font-weight: 600;
     font-size: 14px;
 }
+
+/* ── Status badges ─────────────────────────────────────────────── */
 
 QLabel#downloadStatusBadge {
     color: {{token.text_muted}};
@@ -140,6 +173,8 @@ QLabel#downloadStatusBadge[state="failed"] {
     color: {{token.error}};
     background: {{token.error_bg}};
 }
+
+/* ── Inspector ─────────────────────────────────────────────────── */
 
 QLabel#downloadInspectorTitle {
     font-family: "{{token.body_font}}";
@@ -196,6 +231,8 @@ QFrame#downloadInspectorSeparator {
     max-height: 1px;
 }
 
+/* ── Activity list ─────────────────────────────────────────────── */
+
 QListWidget#activityList {
     background: transparent;
     border: none;
@@ -211,6 +248,8 @@ QLabel#activityTimestamp {
     font-size: 11px;
 }
 
+/* ── Buttons ───────────────────────────────────────────────────── */
+
 QPushButton#linkButton {
     background: transparent;
     color: {{token.accent}};
@@ -222,14 +261,60 @@ QPushButton#linkButton:hover {
     text-decoration: underline;
 }
 
-QPushButton#warningButton {
-    color: {{token.warning}};
-    background: transparent;
-    border: 1px solid {{token.warning}};
+/* ── Error summary ─────────────────────────────────────────────── */
+
+QLabel#downloadErrorSummary {
+    color: {{token.error}};
+    background: {{token.error_bg}};
     border-radius: {{token.radius_md}};
-    min-height: 34px;
+    padding: 3px 9px;
+    font-weight: 600;
+    font-size: 11px;
 }
 
-QPushButton#warningButton:hover {
-    background: {{token.warning_bg}};
+/* ── Bottom tabs ────────────────────────────────────────────────── */
+
+QTabWidget#downloadBottomTabs::pane {
+    background: {{token.surface}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+}
+QTabBar#bottomTabBar {
+    background: transparent;
+}
+QTabBar#bottomTabBar::tab {
+    background: {{token.surface_raised}};
+    color: {{token.text_muted}};
+    padding: 4px 12px;
+    border: 1px solid {{token.border}};
+    border-bottom: none;
+    border-top-left-radius: {{token.radius_md}};
+    border-top-right-radius: {{token.radius_md}};
+    font-size: 11px;
+}
+QTabBar#bottomTabBar::tab:selected {
+    background: {{token.surface}};
+    color: {{token.text}};
+    font-weight: 600;
+}
+QTabBar#bottomTabBar::tab:hover:!selected {
+    background: {{token.surface}};
+    color: {{token.text}};
+}
+
+
+QSplitter#downloadWorkspaceSplitter::handle {
+    background: {{token.border}};
+}
+
+QPushButton#actionGroupDestructive {
+    background: transparent;
+    border: none;
+    color: {{token.text_muted}};
+    padding: 6px 8px;
+}
+
+QPushButton#actionGroupDestructive:hover {
+    color: {{token.error}};
+    background: {{token.error_bg}};
 }

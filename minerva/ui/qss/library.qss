@@ -65,12 +65,7 @@ QToolButton#facetHeader {
 }
 QToolButton#facetHeader:hover { color: {{token.accent}}; }
 
-QLabel#coverPreview {
-    background: {{token.background}};
-    border: 1px solid {{token.border}};
-    border-radius: {{token.radius_lg}};
-    padding: 6px;
-}
+/* coverPreview uses the shared base.qss definition (radius_md). */
 QLabel#libraryInspectorTitle {
     font-family: "{{token.body_font}}";
     color: {{token.text}};
@@ -94,12 +89,4 @@ QProgressBar#libraryLoadingBar {
     background: {{token.surface_raised}};
 }
 QProgressBar#libraryLoadingBar::chunk { background: {{token.accent}}; border-radius: {{token.radius_sm}}; }
-QLabel#emptyStateTitle { color: {{token.text}}; font-size: 17px; font-weight: 650; }
-QLabel#emptyStateDescription { color: {{token.text_muted}}; font-size: 12px; }
-QPushButton#accentButton {
-    background: {{token.accent}};
-    color: white;
-    border: 1px solid {{token.accent}};
-    border-radius: {{token.radius_md}};
-    padding: 5px 14px;
-}
+/* emptyStateTitle and emptyStateDescription are defined in states.qss (shared). */

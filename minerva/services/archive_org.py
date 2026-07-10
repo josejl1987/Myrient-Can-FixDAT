@@ -13,7 +13,9 @@ from urllib.parse import quote
 from internetarchive import get_item, search_items
 
 from minerva.domain.sources import Candidate, DownloadSource
-from minerva_db import DatEntry, core_title, stem_from_romname, title_keywords
+from minerva.matching.scoring import core_title, title_keywords
+from minerva.parsers.dat_parser import DatEntry
+from minerva_db import stem_from_romname
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +106,89 @@ def _build_archive_org_query(title: str) -> str:
     return f'mediatype:data AND title:"{escaped}"'
 
 
+def _filename_similarity(dat_filename: str, rom_filename: str) -> float:
+    """Normalized similarity between DAT entry filename and ROM filename."""
+    from difflib import SequenceMatcher
+    from pathlib import PurePosixPath
+    dat_stem = PurePosixPath(dat_filename).stem.lower()
+    rom_stem = PurePosixPath(rom_filename).stem.lower()
+    return SequenceMatcher(None, dat_stem, rom_stem).ratio()
+
+
+def _score_rom_file(
+    prior: float,
+    dat_filename: str,
+    rom_filename: str,
+    dat_size: int,
+    rom_size: int,
+) -> float:
+    """Compute per-file confidence score.
+
+    Combines the item-level prior (weight 0.3), filename similarity
+    (weight 0.4), exact size match (+0.2), extension match (+0.05),
+    and region evidence (+0.05). Capped at 0.99.
+    """
+    from pathlib import PurePosixPath
+    filename_sim = _filename_similarity(dat_filename, rom_filename)
+    size_bonus = 0.2 if dat_size > 0 and rom_size == dat_size else 0.0
+    dat_ext = PurePosixPath(dat_filename).suffix.lower()
+    rom_ext = PurePosixPath(rom_filename).suffix.lower()
+    ext_bonus = 0.05 if dat_ext and dat_ext == rom_ext else 0.0
+    # Region evidence: award bonus only when both filenames share the
+    # same region token (agreement), not just presence in the ROM.
+    region_tokens = {"usa", "europe", "japan", "world", "(u)", "(e)", "(j)", "(w)"}
+    dat_lower = dat_filename.lower()
+    rom_lower = rom_filename.lower()
+    dat_regions = {t for t in region_tokens if t in dat_lower}
+    rom_regions = {t for t in region_tokens if t in rom_lower}
+    region_bonus = 0.05 if dat_regions and dat_regions & rom_regions else 0.0
+    return min(prior * 0.3 + filename_sim * 0.4 + size_bonus + ext_bonus + region_bonus, 0.99)
+
+
+def _infer_system_from_item(
+    metadata: dict,
+    collections: list,
+    identifier: str,
+) -> str:
+    """Best-effort system inference from item metadata, not from the request.
+
+    Returns "" if no system can be determined.
+    """
+    # Check collection names for known system hints.
+    collection_map = {
+        "nintendo_roms": "Nintendo",
+        "sega_roms": "Sega",
+        "no-intro": "",
+        "redump": "",
+        "tosec": "",
+        "software": "",
+        "softwarelibrary": "",
+    }
+    for col in collections:
+        col_lower = str(col).lower()
+        for key, sys_name in collection_map.items():
+            if key in col_lower and sys_name:
+                return sys_name
+    # Check metadata for a 'subject' or 'description' field that might
+    # contain a system name.
+    subject = str(metadata.get("subject", "")).lower()
+    system_hints = {
+        "nes": "Nintendo - Nintendo Entertainment System",
+        "snes": "Nintendo - Super Nintendo Entertainment System",
+        "n64": "Nintendo - Nintendo 64",
+        "gameboy": "Nintendo - Game Boy",
+        "gba": "Nintendo - Game Boy Advance",
+        "nds": "Nintendo - Nintendo DS",
+        "genesis": "Sega - Mega Drive - Genesis",
+        "megadrive": "Sega - Mega Drive - Genesis",
+        "psx": "Sony - PlayStation",
+        "ps1": "Sony - PlayStation",
+    }
+    for hint, sys_name in system_hints.items():
+        if hint in subject:
+            return sys_name
+    return ""
+
 # ── In-memory TTL cache decorator ─────────────────────────────────────────────
 def _ttl_cache(ttl: int = _CACHE_TTL):
     """Decorator that caches the wrapped method's return value for *ttl* seconds.
@@ -176,7 +261,13 @@ class ArchiveOrgCandidateProvider:
         self._client = client or ArchiveOrgSearchClient()
 
     def search(self, entry: DatEntry, system: str | None = None) -> list[Candidate]:
-        """Search Archive.org and return candidates matching *entry*."""
+        """Search Archive.org and return candidates matching *entry*.
+
+        Scoring is per-file: each ROM file in an item gets an independent
+        confidence score based on filename similarity, size match, and
+        extension/region evidence. The item-level keyword overlap is used
+        only as a weak prior.
+        """
         stem = stem_from_romname(entry.filename)
         query = _build_archive_org_query(core_title(stem))
         if not query:
@@ -193,12 +284,7 @@ class ArchiveOrgCandidateProvider:
             item_title = result.get("title", "")
             collections = result.get("collection", []) or []
 
-            # Optional system filter: limit to items where collection or
-            # identifier hints at the target system.
-            # (Applied loosely here; strict filtering is the caller's
-            # responsibility.)
-
-            # Keyword overlap between entry stem and item title.
+            # Keyword overlap between entry stem and item title (weak prior).
             overlap = _keyword_overlap(entry_keywords, item_title)
 
             # Collection confidence boost.
@@ -220,24 +306,31 @@ class ArchiveOrgCandidateProvider:
             if not rom_files:
                 continue
 
-            # Check for torrent availability.
-            has_torrent = any(
-                f.get("name", "").endswith("_archive.torrent")
-                for f in (item.files or [])
+            # Check for torrent availability — use actual torrent filename
+            # from item files, not a constructed guess (P1-6).
+            torrent_file = next(
+                (f.get("name", "") for f in (item.files or [])
+                 if f.get("name", "").endswith("_archive.torrent")),
+                None,
+            )
+            has_torrent = torrent_file is not None
+            source = DownloadSource.ARCHIVE_ORG_TORRENT if has_torrent else DownloadSource.ARCHIVE_ORG_HTTP
+            torrent_url = (
+                ArchiveOrgSearchClient.build_download_url(identifier, torrent_file)
+                if has_torrent else None
             )
 
-            # Determine source.
-            source = DownloadSource.ARCHIVE_ORG_TORRENT if has_torrent else DownloadSource.ARCHIVE_ORG_HTTP
-            torrent_url = f"https://archive.org/download/{identifier}/{identifier}_archive.torrent" if has_torrent else None
+            # Item-level prior: keyword overlap * collection boost.
+            prior = min(overlap * boost, 0.95)
+            if prior <= 0:
+                prior = 0.3
 
-            # Build confidence score.
-            # Base: keyword overlap (0.0–1.0) * collection boost, capped at 0.95
-            # to leave room for more precise matching layers.
-            base_conf = min(overlap * boost, 0.95)
-            if base_conf <= 0:
-                base_conf = 0.3  # minimum confidence for any match
+            # Infer system from item metadata, not from the request.
+            item_system = _infer_system_from_item(
+                item.metadata, collections if isinstance(collections, list) else [collections], identifier,
+            )
 
-            # Create one Candidate per ROM file.
+            # Create one Candidate per ROM file with independent scoring.
             for rom in rom_files:
                 filename = rom.get("name", "")
                 size = int(rom.get("size", 0) or 0)
@@ -247,15 +340,24 @@ class ArchiveOrgCandidateProvider:
                     continue
                 seen.add(source_ref)
 
+                # Per-file confidence (P1-4).
+                file_conf = _score_rom_file(
+                    prior=prior,
+                    dat_filename=entry.filename,
+                    rom_filename=filename,
+                    dat_size=entry.size,
+                    rom_size=size,
+                )
+
                 c = Candidate(
                     title=filename.rsplit("/", 1)[-1],  # basename
                     size=size,
-                    confidence=base_conf,
+                    confidence=file_conf,
                     method="keyword_overlap",
                     source=source,
                     source_ref=source_ref,
                     collection=item.metadata.get("collection", ""),
-                    system=system or "",
+                    system=item_system,
                     regions=(),
                     reasons=[f"Matched via archive.org item '{item_title}'"],
                     torrent_url=torrent_url,

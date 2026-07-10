@@ -42,5 +42,13 @@
   "tests/test_download_controller.py::TestMapQbitState::test_known_states[pausedUP-completed]": true,
   "tests/test_qbit_monitor.py::TestPoll::test_poll_no_results_no_signal": true,
   "tests/test_minerva_qbit.py::TestAddTorrentPausedVersionAware::test_v4_uses_paused_parameter": true,
-  "tests/test_minerva_qbit.py::TestAddTorrentPausedVersionAware::test_v5_uses_stopped_parameter": true
+  "tests/test_minerva_qbit.py::TestAddTorrentPausedVersionAware::test_v5_uses_stopped_parameter": true,
+  "tests/test_debug_scope.py::test_debug": true,
+  "tests/test_report_acquisition_service.py::test_debug_scope_inference3": true,
+  "tests/test_download_controller.py::TestOnSnapshotDeferred::test_queue_cache_not_nulled_mid_iteration": true,
+  "tests/test_native_torrent.py::TestRenameFileMatching::test_backslash_path_normalized": true,
+  "tests/ui/test_shell_visual.py::test_window_title_is_minerva_fixdat": true,
+  "tests/test_archive_org_lifecycle.py::TestCandidateRankingDeterministic::test_best_survives_truncation": true,
+  "tests/test_archive_org_lifecycle.py::TestHTTPE2E::test_http_completion_publishes_completed": true,
+  "tests/test_bootstrap.py::test_main_configures_logging": true
 }

@@ -673,7 +673,7 @@ Then simplify `_queue_report` (lines 1006-1025) to use it:
             controller = getattr(self.window(), "download_controller", None)
             if controller is None:
                 NotificationBanner.show_error(
-                    self, "Queue failed", "The qBittorrent controller is not initialised",
+                    self, "Queue failed", "The external torrent client controller is not initialised",
                 )
                 return
             controller.reconcile()
@@ -896,7 +896,7 @@ Expected: PASS for those two.
             controller = getattr(self.window(), "download_controller", None)
             if controller is None:
                 NotificationBanner.show_error(
-                    self, "Queue failed", "The qBittorrent controller is not initialised",
+                    self, "Queue failed", "The external torrent client controller is not initialised",
                 )
                 return
             controller.reconcile()

@@ -12,8 +12,14 @@ Test configuration:
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
+# ── sys.path bootstrap ─────────────────────────────────────────────────────
+# Centralized here so individual test files don't need their own sys.path hacks.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 os.environ.setdefault("QT_API", "pyqt6")
 os.environ.setdefault("PYTEST_QT_API", "pyqt6")
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -154,3 +160,100 @@ def populated_queue_model(make_queue_item):
     ]
     model = QueueItemRecordModel(items, _QUEUE_COLUMNS)
     return model
+
+
+# ==============================================================================
+# Domain factory fixtures (added by PR 6 fixture consolidation)
+# ==============================================================================
+
+
+@pytest.fixture
+def make_report():
+    """Factory for ReportSummary with sensible defaults."""
+    from minerva.domain.reports import ReportSummary
+
+    def _make(rid: str = "test-report", **overrides) -> ReportSummary:
+        defaults = dict(
+            id=rid,
+            path=f"{rid}.dat",
+            name=f"Report-{rid}",
+            collection="Nintendo",
+            system="Nintendo - Game Boy Color",
+            imported_at="2025-01-01T00:00:00",
+            requested_count=2,
+            status="reviewed",
+        )
+        defaults.update(overrides)
+        return ReportSummary(**defaults)
+
+    return _make
+
+
+@pytest.fixture
+def indexed_rom_db(tmp_path):
+    """A MinervaDB with a small test index (7 files + 3 torrents).
+
+    Consolidates the ``_build_test_index`` helper that was duplicated across
+    test_report_acquisition_service.py, test_report_acquisition_extra.py,
+    and test_report_triage.py.
+    """
+    import sqlite3
+
+    from minerva_db import SCHEMA_V3
+
+    db_path = tmp_path / "test_index.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode = OFF")
+    conn.execute("PRAGMA synchronous = OFF")
+    conn.executescript(SCHEMA_V3)
+
+    test_files = [
+        (1, "super mario bros (world)", "Super Mario Bros (World).zip",
+         "test_torrent.torrent", 1, 102400, "Super Mario Bros (World).zip",
+         "Nintendo", "Nintendo - Nintendo Entertainment System"),
+        (2, "the legend of zelda (usa)", "The Legend of Zelda (USA).zip",
+         "test_torrent.torrent", 2, 204800, "The Legend of Zelda (USA).zip",
+         "Nintendo", "Nintendo - Nintendo Entertainment System"),
+        (3, "metroid (usa)", "Metroid (USA).zip",
+         "test_torrent.torrent", 3, 409600, "Metroid (USA).zip",
+         "Nintendo", "Nintendo - Nintendo Entertainment System"),
+        (4, "sonic the hedgehog (usa)", "Sonic the Hedgehog (USA).zip",
+         "test_torrent2.torrent", 1, 512000, "Sonic the Hedgehog (USA).zip",
+         "Sega", "Sega - Mega Drive - Genesis"),
+        (5, "game boy color bios", "Game Boy Color BIOS.bin",
+         "test_torrent3.torrent", 1, 0, "Game Boy Color BIOS.bin",
+         "Nintendo", "Nintendo - Game Boy Color"),
+        (6, "pokemon red (usa)", "Pokemon Red (USA).zip",
+         "test_torrent3.torrent", 2, 524288, "Pokemon Red (USA).zip",
+         "Nintendo", "Nintendo - Game Boy Color"),
+        (7, "pokemon blue (usa)", "Pokemon Blue (USA).zip",
+         "test_torrent3.torrent", 3, 524288, "Pokemon Blue (USA).zip",
+         "Nintendo", "Nintendo - Game Boy Color"),
+    ]
+    conn.executemany(
+        """INSERT INTO files (id, stem, basename, torrent, select_idx, size,
+                              path_full, collection, system)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        test_files,
+    )
+    conn.execute(
+        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
+        ("test_torrent.torrent", "Nintendo", "Nintendo - Nintendo Entertainment System", 3),
+    )
+    conn.execute(
+        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
+        ("test_torrent2.torrent", "Sega", "Sega - Mega Drive - Genesis", 1),
+    )
+    conn.execute(
+        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
+        ("test_torrent3.torrent", "Nintendo", "Nintendo - Game Boy Color", 3),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3')",
+    )
+    conn.commit()
+    conn.close()
+
+    from minerva_db import MinervaDB
+
+    return MinervaDB(db_path=str(db_path))

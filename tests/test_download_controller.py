@@ -1,8 +1,8 @@
 """
 Tests for DownloadController — queue commands, queries, snapshot
-reconciliation, and qBittorrent state mapping.
+reconciliation, and native torrent engine state mapping.
 
-Uses an in-memory-file MinervaState (tmp_path) and a mock QBittorrentClient.
+Uses an in-memory-file MinervaState (tmp_path) and a mock NativeTorrentSession.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from minerva.domain.downloads import (
     TorrentInfo,
 )
 from minerva_state import MinervaState
-from minerva_qbit import QBittorrentError
+from minerva.native_torrent import NativeTorrentError
 
 
 # ============================================================================
@@ -77,46 +77,38 @@ def _make_spec(file_id: int = 1, torrent_name: str = "test.torrent") -> Download
 
 
 # ============================================================================
-# _map_qbit_state — pure classmethod, all status mappings
+# _map_torrent_state — pure classmethod, all status mappings
 # ============================================================================
 
 
-class TestMapQbitState:
+class TestMapTorrentEngineState:
     @pytest.mark.parametrize("raw,expected", [
         ("error", DownloadStatus.FAILED),
-        ("missingFiles", DownloadStatus.FAILED),
-        ("pausedDL", DownloadStatus.PAUSED),
-        ("queuedDL", DownloadStatus.QUEUED),
+        ("missing_files", DownloadStatus.FAILED),
+        ("paused", DownloadStatus.PAUSED),
+        ("queued", DownloadStatus.QUEUED),
         ("downloading", DownloadStatus.DOWNLOADING),
-        ("stalledDL", DownloadStatus.DOWNLOADING),
-        ("forcedDL", DownloadStatus.DOWNLOADING),
-        ("metaDL", DownloadStatus.STARTING),
-        ("checkingDL", DownloadStatus.STARTING),
-        ("checkingUP", DownloadStatus.STARTING),
+        ("metadata", DownloadStatus.STARTING),
+        ("checking", DownloadStatus.STARTING),
         ("allocating", DownloadStatus.STARTING),
-        ("checkingResumeData", DownloadStatus.STARTING),
-        ("moving", DownloadStatus.STARTING),
-        ("pausedUP", DownloadStatus.PAUSED),
-        ("uploading", DownloadStatus.PAUSED),
-        ("stalledUP", DownloadStatus.PAUSED),
-        ("forcedUP", DownloadStatus.PAUSED),
-        ("queuedUP", DownloadStatus.QUEUED),
+        ("checking_resume", DownloadStatus.STARTING),
+        ("completed", DownloadStatus.COMPLETED),
+        ("seeding", DownloadStatus.SEEDING),
     ])
     def test_known_states(self, raw, expected):
-        assert DownloadController._map_qbit_state(raw, 0.0) == expected
+        assert DownloadController._map_torrent_state(raw, 0.0) == expected
 
     def test_unknown_state_defaults_to_downloading(self):
-        assert DownloadController._map_qbit_state("bogus", 0.0) == DownloadStatus.DOWNLOADING
+        assert DownloadController._map_torrent_state("bogus", 0.0) == DownloadStatus.DOWNLOADING
 
     def test_complete_progress_non_upload(self):
-        assert DownloadController._map_qbit_state("downloading", 1.0) == DownloadStatus.COMPLETED
+        assert DownloadController._map_torrent_state("downloading", 1.0) == DownloadStatus.COMPLETED
 
     def test_complete_progress_upload_state_is_seeding(self):
-        for raw in ("uploading", "stalledUP", "forcedUP", "queuedUP"):
-            assert DownloadController._map_qbit_state(raw, 1.0) == DownloadStatus.SEEDING
+        assert DownloadController._map_torrent_state("seeding", 1.0) == DownloadStatus.SEEDING
 
-    def test_complete_progress_pausedUP_is_completed(self):
-        assert DownloadController._map_qbit_state("pausedUP", 1.0) == DownloadStatus.COMPLETED
+    def test_complete_progress_completed_is_completed(self):
+        assert DownloadController._map_torrent_state("completed", 1.0) == DownloadStatus.COMPLETED
 
 
 # ============================================================================
@@ -232,7 +224,7 @@ class TestQueries:
 
 
 # ============================================================================
-# pause / resume / retry — no qbit_hash path (pure state updates)
+# pause / resume / retry — no torrent_hash path (pure state updates)
 # ============================================================================
 
 
@@ -264,7 +256,7 @@ class TestPauseResumeRetry:
         rec = state.list_queue()[0]
         assert rec.status == DownloadStatus.QUEUED.value
         assert rec.error is None
-        assert rec.qbit_hash is None
+        assert rec.torrent_hash is None
 
     def test_retry_unknown_record_is_noop(self, controller):
         controller.retry("nonexistent")
@@ -289,7 +281,7 @@ class TestRemove:
 
         rid = controller.add_to_queue(1, "/dest/a.zip")
         controller._runtime[rid] = DownloadRuntime(
-            record_id=rid, qbit_hash=None, torrent_name="t",
+            record_id=rid, torrent_hash=None, torrent_name="t",
         )
         controller.remove(rid)
         assert rid not in controller._runtime
@@ -360,7 +352,7 @@ class TestOnSnapshot:
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
         controller._runtime[rid] = DownloadRuntime(
-            record_id=rid, qbit_hash="abc", torrent_name="t",
+            record_id=rid, torrent_hash="abc", torrent_name="t",
         )
         controller._on_snapshot([])
         assert len(controller.get_runtime()) == 1
@@ -368,7 +360,7 @@ class TestOnSnapshot:
     def test_updates_runtime_for_matching_hash(self, controller, state):
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef")
+        state.update_queue_record(rid, torrent_hash="deadbeef")
 
         ti = TorrentInfo(
             hash="deadbeef", name="test_torrent", progress=0.5,
@@ -382,14 +374,14 @@ class TestOnSnapshot:
         controller._on_snapshot([ti])
         rt = controller.get_runtime_for(rid)
         assert rt is not None
-        assert rt.qbit_hash == "deadbeef"
+        assert rt.torrent_hash == "deadbeef"
         assert rt.progress == 0.5
         assert rt.download_speed == 100
 
     def test_status_transition_to_downloading(self, controller, state):
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
-        state.update_queue_record(rid, qbit_hash="h1")
+        state.update_queue_record(rid, torrent_hash="h1")
 
         ti = TorrentInfo(
             hash="h1", name="t", progress=0.0, state="downloading",
@@ -405,11 +397,11 @@ class TestOnSnapshot:
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="h1", status=DownloadStatus.COMPLETED.value,
+            rid, torrent_hash="h1", status=DownloadStatus.COMPLETED.value,
         )
 
         ti = TorrentInfo(
-            hash="h1", name="t", progress=1.0, state="uploading",
+            hash="h1", name="t", progress=1.0, state="seeding",
             dlspeed=0, upspeed=100, size=1024, completed=1024, ratio=1.0,
             eta=-1, save_path="/s", seeds=5, peers=0,
             files=(TorrentFileInfo(index=0, name="rom.zip", size=1024, progress=1.0, priority=1),),
@@ -418,12 +410,12 @@ class TestOnSnapshot:
         assert state.list_queue()[0].status == DownloadStatus.SEEDING.value
 
     def test_completed_never_regresses_to_downloading(self, controller, state):
-        """A COMPLETED record must not regress even if qBittorrent reports
+        """A COMPLETED record must not regress even if native torrent engine reports
         a download-active state (e.g. after a transient state change)."""
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="h1", status=DownloadStatus.COMPLETED.value,
+            rid, torrent_hash="h1", status=DownloadStatus.COMPLETED.value,
         )
         ti = TorrentInfo(
             hash="h1", name="t", progress=0.5, state="downloading",
@@ -435,15 +427,15 @@ class TestOnSnapshot:
         assert state.list_queue()[0].status == DownloadStatus.COMPLETED.value
 
     def test_seeding_never_regresses_to_downloading(self, controller, state):
-        """A SEEDING record must not regress even if qBittorrent reports
+        """A SEEDING record must not regress even if native torrent engine reports
         a download-active state."""
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="h1", status=DownloadStatus.SEEDING.value,
+            rid, torrent_hash="h1", status=DownloadStatus.SEEDING.value,
         )
         ti = TorrentInfo(
-            hash="h1", name="t", progress=0.3, state="stalledDL",
+            hash="h1", name="t", progress=0.3, state="downloading",
             dlspeed=0, upspeed=0, size=1024, completed=300, ratio=0.3,
             eta=-1, save_path="/s", seeds=0, peers=0,
             files=(TorrentFileInfo(index=0, name="rom.zip", size=1024, progress=0.3, priority=1),),
@@ -456,10 +448,10 @@ class TestOnSnapshot:
         controller.file_spec_resolver = lambda fid: _make_spec(file_id=fid)
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="h1", status=DownloadStatus.SEEDING.value,
+            rid, torrent_hash="h1", status=DownloadStatus.SEEDING.value,
         )
         ti = TorrentInfo(
-            hash="h1", name="t", progress=1.0, state="uploading",
+            hash="h1", name="t", progress=1.0, state="seeding",
             dlspeed=0, upspeed=500, size=1024, completed=1024, ratio=2.5,
             eta=-1, save_path="/s", seeds=10, peers=3,
             files=(TorrentFileInfo(index=0, name="rom.zip", size=1024, progress=1.0, priority=1),),
@@ -477,13 +469,13 @@ class TestOnSnapshot:
 
 
 class TestOnConnectionChanged:
-    def test_sets_qbit_state_true(self, controller, app_state):
+    def test_sets_torrent_engine_state_true(self, controller, app_state):
         controller._on_connection_changed(True)
-        assert app_state._qbit_state is True
+        assert app_state._torrent_engine_state is True
 
-    def test_sets_qbit_state_false(self, controller, app_state):
+    def test_sets_torrent_engine_state_false(self, controller, app_state):
         controller._on_connection_changed(False)
-        assert app_state._qbit_state is False
+        assert app_state._torrent_engine_state is False
 
 
 # ============================================================================
@@ -560,7 +552,7 @@ class TestSubmitTorrentGroup:
 
         rec = state.list_queue()[0]
         assert rec.status == DownloadStatus.DOWNLOADING.value
-        assert rec.qbit_hash == "deadbeef"
+        assert rec.torrent_hash == "deadbeef"
 
     def test_missing_torrent_marks_records_failed(self, sync_controller, state):
         spec = _make_spec(file_id=1, torrent_name="missing.torrent")
@@ -719,7 +711,7 @@ class TestSubmitTorrentRename:
         client = sync_controller._client
         client.add_torrent_paused.return_value = "deadbeef"
         client.get_files.return_value = [{"index": 0, "name": "rom.zip", "size": 1024}]
-        client.rename.side_effect = QBittorrentError("rename failed")
+        client.rename.side_effect = NativeTorrentError("rename failed")
 
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
         state.update_queue_record(rid, status=DownloadStatus.QUEUED.value)
@@ -728,7 +720,7 @@ class TestSubmitTorrentRename:
         # Download should still succeed despite rename failure.
         rec = state.list_queue()[0]
         assert rec.status == DownloadStatus.DOWNLOADING.value
-        assert rec.qbit_hash == "deadbeef"
+        assert rec.torrent_hash == "deadbeef"
 
 
 class TestScheduleCompletedFile:
@@ -746,14 +738,14 @@ class TestScheduleCompletedFile:
         )
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(dest))
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
 
         client = sync_controller._client
         client.get_files.return_value = [{"index": 0, "name": "rom.zip", "size": 1024}]
 
         ti = TorrentInfo(
             hash="deadbeef", name="test_torrent", progress=1.0,
-            state="pausedUP", dlspeed=0, upspeed=0, size=1024,
+            state="completed", dlspeed=0, upspeed=0, size=1024,
             completed=1024, ratio=0.0, eta=-1, save_path=str(tmp_path / "seed"),
             seeds=0, peers=0, files=(),
         )
@@ -778,7 +770,7 @@ class TestScheduleCompletedFile:
         )
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(dest))
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
 
         def failing_link(*args, **kwargs):
             raise OSError("not supported")
@@ -789,7 +781,7 @@ class TestScheduleCompletedFile:
         client.get_files.return_value = [{"index": 0, "name": "rom.zip", "size": 1024}]
         ti = TorrentInfo(
             hash="deadbeef", name="test_torrent", progress=1.0,
-            state="pausedUP", dlspeed=0, upspeed=0, size=1024,
+            state="completed", dlspeed=0, upspeed=0, size=1024,
             completed=1024, ratio=0.0, eta=-1, save_path=str(tmp_path / "seed"),
             seeds=0, peers=0, files=(),
         )
@@ -812,13 +804,13 @@ class TestScheduleCompletedFile:
         )
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(dest))
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
 
         client = sync_controller._client
         client.get_files.return_value = [{"index": 0, "name": "rom.zip", "size": 1024}]
         ti = TorrentInfo(
             hash="deadbeef", name="test_torrent", progress=1.0,
-            state="pausedUP", dlspeed=0, upspeed=0, size=1024,
+            state="completed", dlspeed=0, upspeed=0, size=1024,
             completed=1024, ratio=0.0, eta=-1, save_path=str(tmp_path / "downloads"),
             seeds=0, peers=0, files=(),
         )
@@ -837,13 +829,13 @@ class TestScheduleCompletedFile:
         )
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(dest))
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
 
         client = sync_controller._client
         client.get_files.return_value = [{"index": 0, "name": "rom.zip", "size": 1024}]
         ti = TorrentInfo(
             hash="deadbeef", name="test_torrent", progress=1.0,
-            state="pausedUP", dlspeed=0, upspeed=0, size=1024,
+            state="completed", dlspeed=0, upspeed=0, size=1024,
             completed=1024, ratio=0.0, eta=-1, save_path=str(tmp_path / "seed"),
             seeds=0, peers=0, files=(),
         )
@@ -855,9 +847,9 @@ class TestScheduleCompletedFile:
     def test_missing_spec_marks_failed(self, sync_controller, state):
         sync_controller.file_spec_resolver = lambda fid: None
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
         ti = TorrentInfo(
-            hash="deadbeef", name="t", progress=1.0, state="pausedUP",
+            hash="deadbeef", name="t", progress=1.0, state="completed",
             dlspeed=0, upspeed=0, size=100, completed=100, ratio=0.0, eta=-1,
             save_path="/seed", seeds=0, peers=0, files=(),
         )
@@ -870,10 +862,10 @@ class TestScheduleCompletedFile:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
         sync_controller._linking_records.add(rid)
         ti = TorrentInfo(
-            hash="deadbeef", name="t", progress=1.0, state="pausedUP",
+            hash="deadbeef", name="t", progress=1.0, state="completed",
             dlspeed=0, upspeed=0, size=100, completed=100, ratio=0.0, eta=-1,
             save_path="/seed", seeds=0, peers=0, files=(),
         )
@@ -882,12 +874,12 @@ class TestScheduleCompletedFile:
         )
 
 
-class TestQbitLifecycle:
+class TestTorrentEngineLifecycle:
     def test_pause_with_hash(self, sync_controller, state):
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
         sync_controller.pause(rid)
         rec = state.list_queue()[0]
         assert rec.status == DownloadStatus.PAUSED.value
@@ -897,7 +889,7 @@ class TestQbitLifecycle:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.PAUSED.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.PAUSED.value)
         sync_controller.resume(rid)
         rec = state.list_queue()[0]
         assert rec.status == DownloadStatus.DOWNLOADING.value
@@ -907,7 +899,7 @@ class TestQbitLifecycle:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.PAUSED.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.PAUSED.value)
         sync_controller.remove(rid)
         client = sync_controller._client
         client.delete_torrent.assert_called_once_with("deadbeef", delete_files=False)
@@ -918,8 +910,8 @@ class TestQbitLifecycle:
         sync_controller.file_spec_resolver = lambda fid: spec
         rid1 = sync_controller.add_to_queue(1, "/dest/rom.zip")
         rid2 = sync_controller.add_to_queue(2, "/dest/rom2.zip")
-        state.update_queue_record(rid1, qbit_hash="deadbeef", status=DownloadStatus.PAUSED.value)
-        state.update_queue_record(rid2, qbit_hash="deadbeef", status=DownloadStatus.PAUSED.value)
+        state.update_queue_record(rid1, torrent_hash="deadbeef", status=DownloadStatus.PAUSED.value)
+        state.update_queue_record(rid2, torrent_hash="deadbeef", status=DownloadStatus.PAUSED.value)
         sync_controller.remove(rid1)
         client = sync_controller._client
         client.set_file_priority.assert_called_once_with("deadbeef", [0], 0)
@@ -931,7 +923,7 @@ class TestQbitLifecycle:
         dest = tmp_path / "rom.zip"
         dest.write_bytes(b"data")
         rid = sync_controller.add_to_queue(1, str(dest))
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.PAUSED.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.PAUSED.value)
         sync_controller.remove(rid, delete_files=True)
         assert not dest.exists()
 
@@ -939,7 +931,7 @@ class TestQbitLifecycle:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.DOWNLOADING.value)
         sync_controller.pause_all()
         assert state.list_queue()[0].status == DownloadStatus.PAUSED.value
 
@@ -947,7 +939,7 @@ class TestQbitLifecycle:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, "/dest/rom.zip")
-        state.update_queue_record(rid, qbit_hash="deadbeef", status=DownloadStatus.PAUSED.value)
+        state.update_queue_record(rid, torrent_hash="deadbeef", status=DownloadStatus.PAUSED.value)
         sync_controller.resume_all()
         assert state.list_queue()[0].status == DownloadStatus.DOWNLOADING.value
         assert state.list_queue()[0].status == DownloadStatus.DOWNLOADING.value
@@ -984,7 +976,7 @@ class TestOnSnapshotDeferred:
         spec = _make_spec(file_id=1)
         controller.file_spec_resolver = lambda fid: spec
         rid = controller.add_to_queue(1, str(tmp_path / "dest" / "rom.zip"))
-        state.update_queue_record(rid, qbit_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
 
         # Track when _schedule_completed_file is called relative to the loop
         schedule_calls = []
@@ -1001,7 +993,7 @@ class TestOnSnapshotDeferred:
         dest.write_bytes(b"x" * 1024)
 
         ti = TorrentInfo(
-            hash="abc123", name="test", progress=1.0, state="pausedUP",
+            hash="abc123", name="test", progress=1.0, state="completed",
             dlspeed=0, upspeed=0, size=1024, completed=1024, ratio=0.0,
             eta=-1, save_path="/tmp", category="", seeds=0, peers=0, files=(),
         )
@@ -1024,7 +1016,7 @@ class TestCompletedTorrentCleanup:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(tmp_path / "dest" / "rom.zip"))
-        state.update_queue_record(rid, qbit_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
 
         # Create the destination file so the operation succeeds
         dest = tmp_path / "dest" / "rom.zip"
@@ -1033,13 +1025,13 @@ class TestCompletedTorrentCleanup:
 
         # Simulate torrent completion via snapshot
         ti = TorrentInfo(
-            hash="abc123", name="test", progress=1.0, state="pausedUP",
+            hash="abc123", name="test", progress=1.0, state="completed",
             dlspeed=0, upspeed=0, size=1024, completed=1024, ratio=0.0,
             eta=-1, save_path="/tmp", category="", seeds=0, peers=0, files=(),
         )
         sync_controller._on_snapshot([ti])
 
-        # delete_torrent should have been called via _run_qbit_task
+        # delete_torrent should have been called via _run_torrent_task
         sync_controller._client.delete_torrent.assert_called_with(
             "abc123", delete_files=False,
         )
@@ -1122,7 +1114,7 @@ class TestReconcile:
         controller.reconcile()
         record = state.list_queue()[0]
         assert record.status == DownloadStatus.QUEUED.value
-        assert record.qbit_hash is None
+        assert record.torrent_hash is None
         assert rid in submitted
 
     def test_vanished_torrent_re_queues(self, controller, state, mock_client):
@@ -1131,7 +1123,7 @@ class TestReconcile:
         controller.file_spec_resolver = lambda fid: spec
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="gonehash", status=DownloadStatus.DOWNLOADING.value,
+            rid, torrent_hash="gonehash", status=DownloadStatus.DOWNLOADING.value,
         )
         mock_client.list_torrents.return_value = []
         submitted = []
@@ -1139,7 +1131,7 @@ class TestReconcile:
         controller.reconcile()
         record = state.list_queue()[0]
         assert record.status == DownloadStatus.QUEUED.value
-        assert record.qbit_hash is None
+        assert record.torrent_hash is None
         assert rid in submitted
 
     def test_list_torrents_error_does_not_disable_check(self, controller, state, mock_client):
@@ -1148,7 +1140,7 @@ class TestReconcile:
         controller.file_spec_resolver = lambda fid: spec
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="abc123", status=DownloadStatus.DOWNLOADING.value,
+            rid, torrent_hash="abc123", status=DownloadStatus.DOWNLOADING.value,
         )
         mock_client.list_torrents.side_effect = RuntimeError("connection failed")
         submitted = []
@@ -1156,7 +1148,7 @@ class TestReconcile:
         controller.reconcile()
         record = state.list_queue()[0]
         assert record.status == DownloadStatus.DOWNLOADING.value
-        assert record.qbit_hash == "abc123"
+        assert record.torrent_hash == "abc123"
         assert rid not in submitted
 
     def test_live_torrent_not_re_queued(self, controller, state, mock_client):
@@ -1165,7 +1157,7 @@ class TestReconcile:
         controller.file_spec_resolver = lambda fid: spec
         rid = controller.add_to_queue(1, "/dest/a.zip")
         state.update_queue_record(
-            rid, qbit_hash="livehash", status=DownloadStatus.DOWNLOADING.value,
+            rid, torrent_hash="livehash", status=DownloadStatus.DOWNLOADING.value,
         )
         mock_client.list_torrents.return_value = [{"hash": "livehash"}]
         submitted = []
@@ -1173,7 +1165,7 @@ class TestReconcile:
         controller.reconcile()
         record = state.list_queue()[0]
         assert record.status == DownloadStatus.DOWNLOADING.value
-        assert record.qbit_hash == "livehash"
+        assert record.torrent_hash == "livehash"
         assert rid not in submitted
 
 
@@ -1188,7 +1180,7 @@ class TestCompletedTorrentCleanupSeeding:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(tmp_path / "dest" / "rom.zip"))
-        state.update_queue_record(rid, qbit_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
 
         # Create the destination file
         dest = tmp_path / "dest" / "rom.zip"
@@ -1197,12 +1189,12 @@ class TestCompletedTorrentCleanupSeeding:
 
         # Add a second record for the same hash in SEEDING status
         rid2 = sync_controller.add_to_queue(1, str(tmp_path / "dest2" / "rom2.zip"))
-        state.update_queue_record(rid2, qbit_hash="abc123", status=DownloadStatus.SEEDING.value)
+        state.update_queue_record(rid2, torrent_hash="abc123", status=DownloadStatus.SEEDING.value)
 
-        # Use "uploading" state so the SEEDING record stays SEEDING
-        # (pausedUP would transition it to COMPLETED)
+        # Use "seeding" state so the SEEDING record stays SEEDING
+        # (completed would transition it to COMPLETED)
         ti = TorrentInfo(
-            hash="abc123", name="test", progress=1.0, state="uploading",
+            hash="abc123", name="test", progress=1.0, state="seeding",
             dlspeed=0, upspeed=100, size=1024, completed=1024, ratio=0.0,
             eta=-1, save_path="/tmp", category="", seeds=0, peers=0, files=(),
         )
@@ -1216,14 +1208,14 @@ class TestCompletedTorrentCleanupSeeding:
         spec = _make_spec(file_id=1)
         sync_controller.file_spec_resolver = lambda fid: spec
         rid = sync_controller.add_to_queue(1, str(tmp_path / "dest" / "rom.zip"))
-        state.update_queue_record(rid, qbit_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
+        state.update_queue_record(rid, torrent_hash="abc123", status=DownloadStatus.DOWNLOADING.value)
 
         dest = tmp_path / "dest" / "rom.zip"
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"x" * 1024)
 
         ti = TorrentInfo(
-            hash="abc123", name="test", progress=1.0, state="pausedUP",
+            hash="abc123", name="test", progress=1.0, state="completed",
             dlspeed=0, upspeed=0, size=1024, completed=1024, ratio=0.0,
             eta=-1, save_path="/tmp", category="", seeds=0, peers=0, files=(),
         )
@@ -1232,3 +1224,223 @@ class TestCompletedTorrentCleanupSeeding:
         sync_controller._client.delete_torrent.assert_called_with(
             "abc123", delete_files=False,
         )
+
+
+class TestArchiveOrgTorrentMemberPath:
+    """Tests for archive.org torrent member path matching (P0-2 fix)."""
+
+    def test_nested_duplicate_path_selects_correct_file(
+        self, sync_controller, state, tmp_path, monkeypatch,
+    ):
+        """disc2/game.zip must not match disc1/game.zip — full path comparison."""
+        from minerva.domain.sources import DownloadSource
+        import minerva.app.download_controller as dc_module
+
+        sync_controller.file_spec_resolver = lambda fid: None
+        rid = sync_controller.add_to_queue(
+            0, str(sync_controller._output_dir / "dest" / "game.zip"),
+            source=DownloadSource.ARCHIVE_ORG_TORRENT.value,
+            source_ref="ao-item/disc2/game.zip",
+            torrent_member_path="disc2/game.zip",
+        )
+        mock_response = MagicMock()
+        mock_response.content = b"dummy"
+        mock_response.raise_for_status.return_value = None
+        monkeypatch.setattr(dc_module.requests, "get", lambda *a, **kw: mock_response)
+
+        sync_controller._client.get_files.return_value = [
+            {"index": 0, "name": "disc1/game.zip", "size": 1024, "progress": 0.0, "priority": 0},
+            {"index": 1, "name": "disc2/game.zip", "size": 512, "progress": 0.0, "priority": 0},
+        ]
+        sync_controller._client.add_torrent_paused.return_value = "hash123"
+
+        record = state.list_queue()[0]
+        sync_controller._submit_archive_org_torrent(record)
+
+        calls = sync_controller._client.set_file_priority.call_args_list
+        priority_1_calls = [c for c in calls if c.args[2] == 1]
+        assert len(priority_1_calls) > 0
+        assert priority_1_calls[-1].args[1] == [1]  # disc2, not disc1
+
+    def test_missing_member_fails_closed(
+        self, sync_controller, state, tmp_path, monkeypatch,
+    ):
+        """If target file is not in the torrent, record should FAIL, not download wrong file."""
+        from minerva.domain.sources import DownloadSource
+        import minerva.app.download_controller as dc_module
+
+        sync_controller.file_spec_resolver = lambda fid: None
+        rid = sync_controller.add_to_queue(
+            0, str(sync_controller._output_dir / "dest" / "missing.zip"),
+            source=DownloadSource.ARCHIVE_ORG_TORRENT.value,
+            source_ref="ao-item/missing.zip",
+            torrent_member_path="missing.zip",
+        )
+        mock_response = MagicMock()
+        mock_response.content = b"dummy"
+        mock_response.raise_for_status.return_value = None
+        monkeypatch.setattr(dc_module.requests, "get", lambda *a, **kw: mock_response)
+
+        sync_controller._client.get_files.return_value = [
+            {"index": 0, "name": "other.zip", "size": 1024, "progress": 0.0, "priority": 0},
+        ]
+        sync_controller._client.add_torrent_paused.return_value = "hash123"
+
+        record = state.list_queue()[0]
+        sync_controller._submit_archive_org_torrent(record)
+
+        rec = state.list_queue()[0]
+        assert rec.status == DownloadStatus.FAILED.value
+        assert "not found" in (rec.error or "").lower()
+        # The orphaned torrent must be cleaned up
+        sync_controller._client.delete_torrent.assert_called_with(
+            "hash123", delete_files=False,
+        )
+        # No priority should have been set to 1
+        calls = sync_controller._client.set_file_priority.call_args_list
+        priority_1_calls = [c for c in calls if c.args[2] == 1]
+        assert len(priority_1_calls) == 0
+
+
+class TestArchiveOrgTorrentCompletion:
+    """Tests for archive.org torrent completion with file_id=0 (P0-1 fix)."""
+
+    def test_file_id_zero_torrent_completes(
+        self, sync_controller, state, tmp_path,
+    ):
+        """Archive.org torrent record with file_id=0 should COMPLETED, not FAILED."""
+        from minerva.domain.sources import DownloadSource
+
+        sync_controller.file_spec_resolver = lambda fid: None
+        dest = tmp_path / "downloads" / "dest" / "game.zip"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x" * 1024)
+
+        rid = sync_controller.add_to_queue(
+            0, str(dest),
+            source=DownloadSource.ARCHIVE_ORG_TORRENT.value,
+            source_ref="ao-item/game.zip",
+            expected_size=1024,
+        )
+        state.update_queue_record(rid, torrent_hash="aohash", status=DownloadStatus.DOWNLOADING.value)
+
+        ti = TorrentInfo(
+            hash="aohash", name="ao-item", progress=1.0, state="completed",
+            dlspeed=0, upspeed=0, size=1024, completed=1024, ratio=0.0,
+            eta=-1, save_path=str(tmp_path), category="", seeds=0, peers=0, files=(),
+        )
+        sync_controller._on_snapshot([ti])
+
+        rec = state.list_queue()[0]
+        assert rec.status == DownloadStatus.COMPLETED.value
+
+    def test_file_id_zero_size_mismatch_fails(
+        self, sync_controller, state, tmp_path,
+    ):
+        """Archive.org torrent with wrong expected_size should FAIL."""
+        from minerva.domain.sources import DownloadSource
+
+        sync_controller.file_spec_resolver = lambda fid: None
+        dest = tmp_path / "downloads" / "dest" / "game.zip"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"x" * 512)  # wrong size
+
+        rid = sync_controller.add_to_queue(
+            0, str(dest),
+            source=DownloadSource.ARCHIVE_ORG_TORRENT.value,
+            source_ref="ao-item/game.zip",
+            expected_size=1024,
+        )
+        state.update_queue_record(rid, torrent_hash="aohash", status=DownloadStatus.DOWNLOADING.value)
+
+        ti = TorrentInfo(
+            hash="aohash", name="ao-item", progress=1.0, state="completed",
+            dlspeed=0, upspeed=0, size=512, completed=512, ratio=0.0,
+            eta=-1, save_path=str(tmp_path), category="", seeds=0, peers=0, files=(),
+        )
+        sync_controller._on_snapshot([ti])
+
+        rec = state.list_queue()[0]
+        assert rec.status == DownloadStatus.FAILED.value
+        assert "mismatch" in (rec.error or "").lower()
+
+
+class TestHTTPLifecycleCancellation:
+    """Tests for HTTP job cancellation and generation invalidation (P0-4 fix)."""
+
+    def test_pause_cancels_http_job_and_invalidates_generation(
+        self, controller, state, tmp_path,
+    ):
+        """pause() should cancel the HTTP job and bump generation so stale
+        callbacks are ignored."""
+        from minerva.domain.sources import DownloadSource
+        from minerva.app.download_controller import HttpJob
+
+        controller.file_spec_resolver = lambda fid: None
+        rid = controller.add_to_queue(
+            0, str(tmp_path / "dest" / "file.zip"),
+            source=DownloadSource.ARCHIVE_ORG_HTTP.value,
+            source_ref="ao-item/file.zip",
+        )
+        # Simulate an active HTTP job
+        job = HttpJob(rid, 1)
+        controller._http_jobs[rid] = job
+        controller._http_generations[rid] = 1
+
+        controller.pause(rid)
+
+        assert job.is_cancelled()
+        assert controller._http_generations[rid] == 2  # bumped
+        assert rid not in controller._http_jobs  # popped
+        rec = state.list_queue()[0]
+        assert rec.status == DownloadStatus.PAUSED.value
+
+    def test_stale_http_callback_cannot_overwrite_paused(
+        self, controller, state, tmp_path,
+    ):
+        """A stale worker's _http_failed with old generation must not overwrite PAUSED."""
+        from minerva.domain.sources import DownloadSource
+
+        controller.file_spec_resolver = lambda fid: None
+        rid = controller.add_to_queue(
+            0, str(tmp_path / "dest" / "file.zip"),
+            source=DownloadSource.ARCHIVE_ORG_HTTP.value,
+            source_ref="ao-item/file.zip",
+        )
+        # Simulate: job was generation 1, pause bumped to 2
+        controller._http_generations[rid] = 2
+        # Stale worker emits failed with generation 1
+        controller._on_http_failed(rid, 1, "stale error")
+
+        rec = state.list_queue()[0]
+        # Status should NOT be FAILED — stale callback was ignored
+        assert rec.status != DownloadStatus.FAILED.value
+
+    def test_remove_cancels_http_job_and_cleans_part(
+        self, controller, state, tmp_path,
+    ):
+        """remove() should cancel the HTTP job, bump generation, and clean .part files."""
+        from minerva.domain.sources import DownloadSource
+        from minerva.app.download_controller import HttpJob
+
+        controller.file_spec_resolver = lambda fid: None
+        dest = tmp_path / "dest" / "file.zip"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_suffix(".zip.part")
+        part.write_bytes(b"partial")
+
+        rid = controller.add_to_queue(
+            0, str(dest),
+            source=DownloadSource.ARCHIVE_ORG_HTTP.value,
+            source_ref="ao-item/file.zip",
+        )
+        job = HttpJob(rid, 1)
+        controller._http_jobs[rid] = job
+        controller._http_generations[rid] = 1
+
+        controller.remove(rid, delete_files=True)
+
+        assert job.is_cancelled()
+        assert controller._http_generations[rid] == 2
+        assert not part.exists()  # .part cleaned up
+        assert len(state.list_queue()) == 0

@@ -5,12 +5,9 @@ Run with: python -m pytest tests/test_minerva_retool.py -v
 """
 from __future__ import annotations
 
-import sys
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minerva_retool import (
     RETOOL_PRESETS,

@@ -27,3 +27,44 @@ QLabel#emptyStateDescription {
     color: {{token.text_muted}};
     font-size: 12px;
 }
+
+/* ── Notification banners ─────────────────────────────────────────── */
+QFrame#notificationBanner_info,
+QFrame#notificationBanner_success,
+QFrame#notificationBanner_warning,
+QFrame#notificationBanner_error {
+    border-radius: {{token.radius_md}};
+}
+QLabel#notificationTitle {
+    color: {{token.text}};
+    font-weight: 600;
+    font-size: 12px;
+}
+QLabel#notificationBody {
+    color: {{token.text_muted}};
+    font-size: 11px;
+}
+QPushButton#notificationClose {
+    background: transparent;
+    border: none;
+    border-radius: {{token.radius_sm}};
+    padding: 2px;
+}
+QPushButton#notificationClose:hover { background: {{token.surface_raised}}; }
+QPushButton#notificationAction {
+    background: transparent;
+    border: none;
+    color: {{token.accent}};
+    font-weight: 600;
+    font-size: 11px;
+    padding: 2px 8px;
+}
+QPushButton#notificationAction:hover { text-decoration: underline; }
+
+/* ── Dialog titles ────────────────────────────────────────────────── */
+QLabel#dialogTitle {
+    font-family: "{{token.body_font}}";
+    color: {{token.text}};
+    font-size: 18px;
+    font-weight: 600;
+}

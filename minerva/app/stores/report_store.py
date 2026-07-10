@@ -43,7 +43,8 @@ class ReportStore(QtCore.QObject):
         return self._state.get_report_by_path(path)
 
     def compute_outcome(self, report_id: str) -> ReportOutcome:
-        return ReportAcquisitionService().compute_outcome(report_id)
+        svc = ReportAcquisitionService(state=self._state)
+        return svc.compute_outcome(report_id)
 
     def save_report(self, report: ReportSummary) -> None:
         self._state.save_report(report)
@@ -74,8 +75,63 @@ class ReportStore(QtCore.QObject):
     def update_entry_decisions(self, report_id: str, updates: list) -> None:
         if not updates:
             return
-        self._state.update_entry_decisions(updates)
+        self._state.update_entry_decisions_batch(updates)
         self.entries_updated.emit(report_id)
 
     def add_event(self, kind: str, message: str) -> None:
         self._state.add_event(kind, message)
+
+    # ── Composite mutations ─────────────────────────────────────────────
+
+    def set_entry_decision(
+        self,
+        report_id: str,
+        entry_id: str,
+        decision: str,
+        selected_file_id: int | None = None,
+        selected_source: str | None = None,
+        selected_source_ref: str | None = None,
+    ) -> None:
+        """Update decision + optional source metadata for one entry."""
+        self._state.set_entry_decision(
+            report_id, entry_id, decision,
+            selected_file_id=selected_file_id,
+            selected_source=selected_source,
+            selected_source_ref=selected_source_ref,
+        )
+        self.entries_updated.emit(report_id)
+
+    def save_entries(self, entries: list[ReviewEntry]) -> None:
+        """Persist a batch of review entries and emit entries_updated."""
+        self._state.save_entries(entries)
+        if entries:
+            self.entries_updated.emit(entries[0].report_id)
+
+    # ── Service construction ────────────────────────────────────────────
+
+    def build_service(
+        self,
+        *,
+        download_controller: object | None = None,
+        output_dir: str | Path | None = None,
+    ) -> ReportAcquisitionService:
+        """Construct a ReportAcquisitionService bound to this store's state.
+
+        This is the sanctioned way for pages to obtain a service instance
+        without reaching into ``self._state`` directly.
+        """
+        return ReportAcquisitionService(
+            state=self._state,
+            download_controller=download_controller,
+            output_dir=output_dir,
+        )
+
+    def state_for_worker(self) -> MinervaState:
+        """Return the underlying MinervaState for off-thread use only.
+
+        Worker threads (e.g. ``_match_report_task``) need a MinervaState
+        instance to run matching.  The store itself is a QObject tied to
+        the GUI thread and cannot cross.  This method is the explicit
+        seam for that case — do NOT use it for GUI-thread mutations.
+        """
+        return self._state

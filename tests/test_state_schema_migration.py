@@ -45,7 +45,7 @@ def test_legacy_db_gets_source_columns(tmp_path):
             CREATE TABLE IF NOT EXISTS download_queue (
                 id TEXT PRIMARY KEY, file_id INTEGER NOT NULL,
                 report_entry_id TEXT, status TEXT NOT NULL DEFAULT 'queued',
-                qbit_hash TEXT, destination TEXT NOT NULL, error TEXT,
+                torrent_hash TEXT, destination TEXT NOT NULL, error TEXT,
                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS activity_events (

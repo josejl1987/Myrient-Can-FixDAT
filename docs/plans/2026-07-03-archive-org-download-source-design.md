@@ -7,7 +7,7 @@
 ## Problem
 
 Minerva Can FixDAT downloads ROMs exclusively from the local Minerva torrent
-index via qBittorrent. When a DAT/fix-report entry has no match in the index,
+index via external torrent client. When a DAT/fix-report entry has no match in the index,
 the only recourse is the "CDRomance" external browser link — no in-app
 download path exists for alternative sources.
 
@@ -21,15 +21,15 @@ The current pipeline is monolithic to Minerva torrents:
 
 ```
 DAT entry → match_dat_detailed() [local SQLite] → candidate{file_id}
-→ DownloadController → DownloadFileSpec{torrent_path, qbit_file_index}
-→ qBittorrent selective download
+→ DownloadController → DownloadFileSpec{torrent_path, torrent_file_index}
+→ external torrent client selective download
 ```
 
 Archive.org breaks three assumptions:
 1. **Candidates** come from a network API, not the local index — no `file_id`.
 2. **File specs** point to an HTTP URL or an archive.org torrent, not a
    local `.torrent` file.
-3. **Download routing** must choose between torrent (via qBittorrent) and
+3. **Download routing** must choose between torrent (via external torrent client) and
    HTTP (direct stream), depending on torrent availability and seeders.
 
 ## Goals
@@ -66,8 +66,8 @@ Archive.org breaks three assumptions:
 │         ↓ routes by source                                  │
 │  ┌──────────────────────────────────────────────────────┐  │
 │  │ DownloadSource dispatcher                             │  │
-│  │  ├─ MINERVA_TORRENT → existing qBittorrent path      │  │
-│  │  ├─ ARCHIVE_ORG_TORRENT → fetch .torrent → qBittorrent│  │
+│  │  ├─ MINERVA_TORRENT → existing external torrent client path      │  │
+│  │  ├─ ARCHIVE_ORG_TORRENT → fetch .torrent → external torrent client│  │
 │  │  └─ ARCHIVE_ORG_HTTP → HttpDownloadAdapter (stream)  │  │
 │  └──────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────┘
@@ -245,13 +245,13 @@ def _schedule_record_submission(self, record: QueueRecord) -> None:
     if record.source == DownloadSource.MINERVA_TORRENT.value:
         self._submit_torrent(record)                 # existing path
     elif record.source == DownloadSource.ARCHIVE_ORG_TORRENT.value:
-        self._submit_archive_org_torrent(record)     # fetch .torrent, then qbit
+        self._submit_archive_org_torrent(record)     # fetch .torrent, then torrent
     elif record.source == DownloadSource.ARCHIVE_ORG_HTTP.value:
         self._submit_http(record)                    # HttpDownloadAdapter
 ```
 
 **`_submit_archive_org_torrent`:** Downloads the archive.org `.torrent`
-file to a temp dir, then adds it to qBittorrent via the existing
+file to a temp dir, then adds it to external torrent client via the existing
 `add_torrent_paused` → `set_file_priority` → `resume` flow. The
 `source_ref` carries `identifier/filename` to locate the right file
 within the torrent.
@@ -316,8 +316,8 @@ before enqueuing.
     stream).
 
 - **Integration (pytest-qt):**
-  - `DownloadController` routes by source: Minerva → qbit mock,
-    ARCHIVE_ORG_TORRENT → torrent fetch mock → qbit,
+  - `DownloadController` routes by source: Minerva → torrent mock,
+    ARCHIVE_ORG_TORRENT → torrent fetch mock → torrent,
     ARCHIVE_ORG_HTTP → requests mock.
   - Match review shows merged candidates with source badges.
   - Archive.org unavailability doesn't break Minerva candidate display.

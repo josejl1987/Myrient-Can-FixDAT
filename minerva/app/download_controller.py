@@ -1,4 +1,4 @@
-"""Persistent selective-file download orchestration for qBittorrent."""
+"""Persistent selective-file download orchestration for native torrent engine."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ import requests
 from PyQt6 import QtCore
 
 from minerva.app.app_state import AppState
-from minerva.app.qbit_monitor import NativeMonitor
+from minerva.app.torrent_monitor import NativeMonitor
 from minerva.domain.downloads import (
     DOWNLOAD_ACTIVE_STATUSES,
     DOWNLOAD_DEAD_STATUSES,
@@ -27,6 +27,7 @@ from minerva.domain.downloads import (
     DownloadRuntime,
     DownloadStatus,
     QueueRecord,
+    TorrentFileInfo,
     TorrentInfo,
 )
 from minerva.domain.sources import DownloadSource
@@ -65,6 +66,25 @@ class _FunctionTask(QtCore.QRunnable):
         finally:
             self.signals.finished.emit()
 
+class HttpJob:
+    """Cancellable HTTP download job with generation token."""
+
+    def __init__(self, record_id: str, generation: int) -> None:
+        self.record_id = record_id
+        self.generation = generation
+        self._cancelled = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def start(self, fn: Callable[[], object]) -> None:
+        self._thread = threading.Thread(target=fn, daemon=True)
+        self._thread.start()
+
 
 class DownloadController(QtCore.QObject):
     """Own the persistent queue, selective torrent priorities and telemetry."""
@@ -78,31 +98,23 @@ class DownloadController(QtCore.QObject):
     _monitor_hashes_requested = QtCore.pyqtSignal(object)
     _monitor_stop_requested = QtCore.pyqtSignal()
     _submit_torrent_group_requested = QtCore.pyqtSignal(str)
+    _http_succeeded = QtCore.pyqtSignal(str, int, object)  # record_id, generation, result
+    _http_failed = QtCore.pyqtSignal(str, int, str)        # record_id, generation, error_msg
 
-    _ACTIVE_UPLOAD_STATES = {"uploading", "stalledUP", "forcedUP", "queuedUP"}
-    _QBT_STATUS_MAP: dict[str, DownloadStatus] = {
+    _ACTIVE_UPLOAD_STATES = {"seeding"}
+    _TORRENT_STATUS_MAP: dict[str, DownloadStatus] = {
         "error": DownloadStatus.FAILED,
-        "missingFiles": DownloadStatus.FAILED,
-        "pausedDL": DownloadStatus.PAUSED,
-        "queuedDL": DownloadStatus.QUEUED,
+        "missing_files": DownloadStatus.FAILED,
+        "paused": DownloadStatus.PAUSED,
+        "queued": DownloadStatus.QUEUED,
         "downloading": DownloadStatus.DOWNLOADING,
-        "stalledDL": DownloadStatus.DOWNLOADING,
-        "forcedDL": DownloadStatus.DOWNLOADING,
-        "metaDL": DownloadStatus.STARTING,
-        "checkingDL": DownloadStatus.STARTING,
-        "checkingUP": DownloadStatus.STARTING,
+        "metadata": DownloadStatus.STARTING,
+        "checking": DownloadStatus.STARTING,
         "allocating": DownloadStatus.STARTING,
-        "checkingResumeData": DownloadStatus.STARTING,
-        "moving": DownloadStatus.STARTING,
-        "pausedUP": DownloadStatus.COMPLETED,
-        # Upload-side states — normally progress >= 1.0 when these appear,
-        # but _map_qbit_state guards the progress check first.  If a
-        # transient reports progress < 1.0, map to PAUSED rather than
-        # falling through to the DOWNLOADING default.
-        "uploading": DownloadStatus.PAUSED,
-        "stalledUP": DownloadStatus.PAUSED,
-        "forcedUP": DownloadStatus.PAUSED,
-        "queuedUP": DownloadStatus.QUEUED,
+        "checking_resume": DownloadStatus.STARTING,
+        "completed": DownloadStatus.COMPLETED,
+        "seeding": DownloadStatus.SEEDING,
+        "unknown": DownloadStatus.STARTING,
     }
 
     def __init__(
@@ -128,6 +140,9 @@ class DownloadController(QtCore.QObject):
         self._submitting_torrents: set[str] = set()
         self._resubmit_torrents: set[str] = set()
         self._linking_records: set[str] = set()
+        # HTTP job tracking: record_id → active job + generation counter
+        self._http_jobs: dict[str, HttpJob] = {}
+        self._http_generations: dict[str, int] = {}
         # ponytail: these sets are mutated from QThreadPool callbacks via
         # signal marshalling (which lands on the main thread), so they're
         # safe in practice.  The lock is defensive — it protects against
@@ -141,7 +156,7 @@ class DownloadController(QtCore.QObject):
         self._resolver_torrent_dir: Path = DEFAULT_TORRENT_DIR
 
         # Clear the spec cache when the index is rebuilt so we don't
-        # serve stale file metadata (torrent path, qbit index, size)
+        # serve stale file metadata (torrent path, file index, size)
         # from a previous index generation.
         self._app_state.index_state_changed.connect(self._on_index_changed)
         # Marshal _submit_torrent_group calls to the main thread —
@@ -149,6 +164,18 @@ class DownloadController(QtCore.QObject):
         # loop, so QTimer.singleShot would never fire.
         self._submit_torrent_group_requested.connect(
             self._submit_torrent_group,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        # Marshal HTTP job results from worker thread to main thread.
+        # The worker is a plain threading.Thread (no event loop), so
+        # QTimer.singleShot would silently never fire — signals with
+        # QueuedConnection are the correct cross-thread mechanism.
+        self._http_succeeded.connect(
+            self._on_http_succeeded,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+        self._http_failed.connect(
+            self._on_http_failed,
             QtCore.Qt.ConnectionType.QueuedConnection,
         )
     # ── Queue commands ──────────────────────────────────────────────────
@@ -160,12 +187,18 @@ class DownloadController(QtCore.QObject):
         report_entry_id: str | None = None,
         source: str = DownloadSource.MINERVA_TORRENT.value,
         source_ref: str | None = None,
+        report_id: str | None = None,
+        expected_size: int | None = None,
+        expected_hash: str | None = None,
+        torrent_url: str | None = None,
+        torrent_member_path: str | None = None,
     ) -> str:
         destination = str(Path(destination).expanduser())
         for existing in self._state.list_queue():
             if (
                 existing.file_id == file_id
                 and existing.source == source
+                and existing.source_ref == source_ref
                 and Path(existing.destination) == Path(destination)
                 and existing.status not in {
                     DownloadStatus.CANCELLED.value,
@@ -180,10 +213,15 @@ class DownloadController(QtCore.QObject):
             id=record_id,
             file_id=file_id,
             report_entry_id=report_entry_id,
+            report_id=report_id,
             source=source,
             source_ref=source_ref,
             status=DownloadStatus.QUEUED.value,
             destination=destination,
+            expected_size=expected_size,
+            expected_hash=expected_hash,
+            torrent_url=torrent_url,
+            torrent_member_path=torrent_member_path,
             created_at=now,
             updated_at=now,
         )
@@ -208,13 +246,13 @@ class DownloadController(QtCore.QObject):
 
         # Snapshot existing queue ONCE to deduplicate, instead of per-file.
         existing = self._state.list_queue()
-        existing_keys: set[tuple[int, str, str]] = set()
+        existing_keys: set[tuple[int, str, str, str | None]] = set()
         for rec in existing:
             if rec.status not in {
                 DownloadStatus.CANCELLED.value,
                 DownloadStatus.FAILED.value,
             }:
-                existing_keys.add((rec.file_id, str(Path(rec.destination)), rec.source))
+                existing_keys.add((rec.file_id, str(Path(rec.destination)), rec.source, rec.source_ref))
 
         now = _now_iso()
         ids: list[str] = []
@@ -229,10 +267,15 @@ class DownloadController(QtCore.QObject):
             else:
                 file_id, destination, report_entry_id, source, source_ref = item
             destination = str(Path(destination).expanduser())
-            if (file_id, destination, source) in existing_keys:
+            if (file_id, destination, source, source_ref) in existing_keys:
                 # Already queued — find and return its id.
                 for rec in existing:
-                    if rec.file_id == file_id and str(Path(rec.destination)) == destination and rec.source == source:
+                    if (
+                        rec.file_id == file_id
+                        and str(Path(rec.destination)) == destination
+                        and rec.source == source
+                        and rec.source_ref == source_ref
+                    ):
                         ids.append(rec.id)
                         break
                 continue
@@ -252,7 +295,7 @@ class DownloadController(QtCore.QObject):
             new_records.append(record)
             ids.append(record_id)
             # Track this new record so we don't re-add duplicates within the batch.
-            existing_keys.add((file_id, destination, source))
+            existing_keys.add((file_id, destination, source, source_ref))
 
         # Batch-insert all new records in a single transaction (one connection,
         # one commit) instead of N individual save_queue_record calls.
@@ -280,12 +323,20 @@ class DownloadController(QtCore.QObject):
         record = self._get_record(record_id)
         if record is None:
             return
-        if not record.qbit_hash:
+        if not record.torrent_hash:
+            # HTTP record: bump generation so the canceled worker's
+            # queued failed callback is ignored, then cancel the job.
+            self._http_generations[record_id] = (
+                self._http_generations.get(record_id, 0) + 1
+            )
+            job = self._http_jobs.pop(record_id, None)
+            if job is not None:
+                job.cancel()
             self._update_group_status([record], DownloadStatus.PAUSED)
             return
-        group = self._records_for_hash(record.qbit_hash)
-        self._run_qbit_task(
-            lambda: self._logged_in_clone().pause(record.qbit_hash or ""),
+        group = self._records_for_hash(record.torrent_hash)
+        self._run_torrent_task(
+            lambda: self._torrent_client().pause(record.torrent_hash or ""),
             lambda _result: self._update_group_status(group, DownloadStatus.PAUSED),
             "Pause failed",
         )
@@ -294,16 +345,24 @@ class DownloadController(QtCore.QObject):
         record = self._get_record(record_id)
         if record is None:
             return
-        if not record.qbit_hash:
+        if not record.torrent_hash:
+            # HTTP record: cancel any stale worker first, then bump
+            # generation so its queued callbacks are ignored.
+            job = self._http_jobs.get(record_id)
+            if job is not None:
+                job.cancel()
+            self._http_generations[record_id] = (
+                self._http_generations.get(record_id, 0) + 1
+            )
             self._state.update_queue_record(
                 record.id, status=DownloadStatus.QUEUED.value, error=None,
             )
             self._emit_changed()
             self._schedule_record_submission(record)
             return
-        group = self._records_for_hash(record.qbit_hash)
-        self._run_qbit_task(
-            lambda: self._logged_in_clone().resume(record.qbit_hash or ""),
+        group = self._records_for_hash(record.torrent_hash)
+        self._run_torrent_task(
+            lambda: self._torrent_client().resume(record.torrent_hash or ""),
             lambda _result: self._update_group_status(group, DownloadStatus.DOWNLOADING),
             "Resume failed",
         )
@@ -313,16 +372,16 @@ class DownloadController(QtCore.QObject):
         if record is None:
             return
         # If this record was the last user of its torrent, remove the
-        # torrent from qBittorrent to avoid orphaning it.
-        if record.qbit_hash:
+        # torrent from native torrent engine to avoid orphaning it.
+        if record.torrent_hash:
             siblings = [
                 r for r in self._state.list_queue()
-                if r.id != record.id and r.qbit_hash == record.qbit_hash
+                if r.id != record.id and r.torrent_hash == record.torrent_hash
             ]
             if not siblings:
-                torrent_hash = record.qbit_hash
-                self._run_qbit_task(
-                    lambda: self._logged_in_clone().delete_torrent(
+                torrent_hash = record.torrent_hash
+                self._run_torrent_task(
+                    lambda: self._torrent_client().delete_torrent(
                         torrent_hash, delete_files=False,
                     ),
                     lambda _result: None,
@@ -332,7 +391,7 @@ class DownloadController(QtCore.QObject):
             record.id,
             status=DownloadStatus.QUEUED.value,
             error=None,
-            qbit_hash=None,
+            torrent_hash=None,
         )
         self._emit_changed()
         self._schedule_record_submission(record)
@@ -341,8 +400,8 @@ class DownloadController(QtCore.QObject):
         """Re-queue all FAILED records and return the count retried.
 
         For each failed record: clears its error, resets status to QUEUED,
-        and clears qbit_hash (so ``_schedule_record_submission`` will
-        re-submit the torrent).  Does not delete torrents from qBittorrent
+        and clears torrent_hash (so ``_schedule_record_submission`` will
+        re-submit the torrent).  Does not delete torrents from native torrent engine
         — the caller can call :meth:`retry` for individual records if
         orphan cleanup is needed.
         """
@@ -355,7 +414,7 @@ class DownloadController(QtCore.QObject):
                 record.id,
                 status=DownloadStatus.QUEUED.value,
                 error=None,
-                qbit_hash=None,
+                torrent_hash=None,
             )
             self._schedule_record_submission(record)
         if failed:
@@ -365,10 +424,10 @@ class DownloadController(QtCore.QObject):
     def pause_all(self) -> None:
         # Snapshot active records once to avoid StopIteration if pause()
         active = self.get_active_records()
-        hashes = {r.qbit_hash for r in active if r.qbit_hash}
+        hashes = {r.torrent_hash for r in active if r.torrent_hash}
         for torrent_hash in hashes:
             record = next(
-                (r for r in active if r.qbit_hash == torrent_hash),
+                (r for r in active if r.torrent_hash == torrent_hash),
                 None,
             )
             if record is not None:
@@ -383,19 +442,29 @@ class DownloadController(QtCore.QObject):
         record = self._get_record(record_id)
         if record is None:
             return
+
+        # Cancel HTTP job if active and invalidate its generation so
+        # stale callbacks are ignored.
+        self._http_generations[record_id] = (
+            self._http_generations.get(record_id, 0) + 1
+        )
+        job = self._http_jobs.pop(record_id, None)
+        if job is not None:
+            job.cancel()
+
         spec = self._resolve_spec(record.file_id)
         siblings = [
             r for r in self._state.list_queue()
-            if r.id != record.id and r.qbit_hash and r.qbit_hash == record.qbit_hash
+            if r.id != record.id and r.torrent_hash and r.torrent_hash == record.torrent_hash
         ]
 
-        if record.qbit_hash:
-            torrent_hash = record.qbit_hash
+        if record.torrent_hash:
+            torrent_hash = record.torrent_hash
             if siblings:
                 if spec is not None:
-                    self._run_qbit_task(
-                        lambda: self._logged_in_clone().set_file_priority(
-                            torrent_hash, [spec.qbit_file_index], 0,
+                    self._run_torrent_task(
+                        lambda: self._torrent_client().set_file_priority(
+                            torrent_hash, [spec.torrent_file_index], 0,
                         ),
                         lambda _result: None,
                         "Could not deselect torrent file",
@@ -403,12 +472,12 @@ class DownloadController(QtCore.QObject):
                 else:
                     log.warning(
                         "remove: spec is None for file_id=%d with siblings; "
-                        "cannot deselect file in qBittorrent",
+                        "cannot deselect file in native torrent engine",
                         record.file_id,
                     )
             else:
-                self._run_qbit_task(
-                    lambda: self._logged_in_clone().delete_torrent(
+                self._run_torrent_task(
+                    lambda: self._torrent_client().delete_torrent(
                         torrent_hash, delete_files=delete_files,
                     ),
                     lambda _result: None,
@@ -422,6 +491,13 @@ class DownloadController(QtCore.QObject):
                     dest.unlink()
                 except OSError as exc:
                     self.error.emit(f"Could not remove {dest}: {exc}")
+            # Clean up .part file if it exists
+            part_path = dest.with_suffix(dest.suffix + ".part")
+            if part_path.exists():
+                try:
+                    part_path.unlink()
+                except OSError:
+                    pass
 
         self._state.delete_queue_record(record.id)
         self._runtime.pop(record.id, None)
@@ -518,8 +594,16 @@ class DownloadController(QtCore.QObject):
         self._monitor = None
 
     def shutdown(self) -> None:
-        """Stop monitoring and destroy the torrent session."""
+        """Stop monitoring, cancel HTTP jobs, and destroy the torrent session."""
         self.stop_monitoring()
+        # Cancel all active HTTP jobs and invalidate their generations so
+        # stale callbacks cannot mutate state after teardown.
+        for record_id, job in list(self._http_jobs.items()):
+            self._http_generations[record_id] = (
+                self._http_generations.get(record_id, 0) + 1
+            )
+            job.cancel()
+        self._http_jobs.clear()
         self._client.stop()
 
     def reconcile(self) -> None:
@@ -527,28 +611,28 @@ class DownloadController(QtCore.QObject):
 
         Handles two cases:
         1. QUEUED records without a hash — never submitted.
-        2. Active records with a hash whose torrent vanished from qBittorrent
-           (e.g. after a qBittorrent restart or data loss).
+        2. Active records with a hash whose torrent vanished from the native libtorrent session
+           (e.g. after a session restart or data loss).
         """
         live_hashes: set[str] | None = None
         for record in self._state.list_queue():
-            if record.status == DownloadStatus.QUEUED.value and not record.qbit_hash:
+            if record.status == DownloadStatus.QUEUED.value and not record.torrent_hash:
                 self._schedule_record_submission(record)
                 continue
             # STARTING records without a hash — the torrent submission
             # failed or was interrupted. Re-queue them so they get retried.
-            if record.status == DownloadStatus.STARTING.value and not record.qbit_hash:
+            if record.status == DownloadStatus.STARTING.value and not record.torrent_hash:
                 log.info("reconcile: STARTING record %s has no hash, re-queuing", record.id[:8])
                 self._state.update_queue_record(
                     record.id,
                     status=DownloadStatus.QUEUED.value,
-                    qbit_hash=None,
+                    torrent_hash=None,
                     error=None,
                 )
                 self._schedule_record_submission(record)
                 continue
             # Active record with a hash — verify the torrent still exists.
-            if record.qbit_hash and record.status in {
+            if record.torrent_hash and record.status in {
                 DownloadStatus.STARTING.value,
                 DownloadStatus.DOWNLOADING.value,
                 DownloadStatus.PAUSED.value,
@@ -556,22 +640,22 @@ class DownloadController(QtCore.QObject):
             }:
                 if live_hashes is None:
                     try:
-                        client = self._logged_in_clone()
+                        client = self._torrent_client()
                         live_hashes = {
                             t.get("hash", "") for t in client.list_torrents()
                         }
                     except Exception:
                         log.warning("reconcile: could not query torrent engine, skipping hash verification", exc_info=True)
                         continue
-                if record.qbit_hash not in live_hashes:
+                if record.torrent_hash not in live_hashes:
                     log.info(
                         "reconcile: torrent %s vanished, re-queuing %s",
-                        record.qbit_hash[:8], record.id[:8],
+                        record.torrent_hash[:8], record.id[:8],
                     )
                     self._state.update_queue_record(
                         record.id,
                         status=DownloadStatus.QUEUED.value,
-                        qbit_hash=None,
+                        torrent_hash=None,
                         error=None,
                     )
                     self._schedule_record_submission(record)
@@ -579,8 +663,8 @@ class DownloadController(QtCore.QObject):
 
     @QtCore.pyqtSlot(object)
     def _on_connection_changed(self, connected: object) -> None:
-        """Handle qBittorrent connection state changes."""
-        self._app_state.qbit_state = bool(connected)
+        """Handle native torrent engine connection state changes."""
+        self._app_state.torrent_engine_state = bool(connected)
         if connected:
             # Defer reconcile to the thread pool so it doesn't block
             # the UI thread. Reconcile resolves file specs (opening the
@@ -601,6 +685,10 @@ class DownloadController(QtCore.QObject):
 
         self._run_task(operation, succeeded, failed)
 
+    def reconcile_async(self) -> None:
+        """Non-blocking reconcile for UI callers. Delegates to _reconcile_async."""
+        self._reconcile_async()
+
     # ── Snapshot reconciliation ──────────────────────────────────────────
 
     @QtCore.pyqtSlot(list)
@@ -610,8 +698,8 @@ class DownloadController(QtCore.QObject):
         all_records = self._get_cached_queue()
         records_by_hash: dict[str, list[QueueRecord]] = defaultdict(list)
         for record in all_records:
-            if record.qbit_hash:
-                records_by_hash[record.qbit_hash].append(record)
+            if record.torrent_hash:
+                records_by_hash[record.torrent_hash].append(record)
 
         # Truly terminal: these records must never be processed by the
         # snapshot loop under any circumstances.
@@ -635,11 +723,11 @@ class DownloadController(QtCore.QObject):
                 spec = self._resolve_spec(record.file_id)
                 file_snapshot = None
                 if spec is not None:
-                    file_snapshot = file_by_index.get(spec.qbit_file_index)
+                    file_snapshot = file_by_index.get(spec.torrent_file_index)
                 file_progress = file_snapshot.progress if file_snapshot is not None else ti.progress
                 new_rt = DownloadRuntime(
                     record_id=record.id,
-                    qbit_hash=ti.hash,
+                    torrent_hash=ti.hash,
                     torrent_name=ti.name,
                     progress=file_progress,
                     download_speed=ti.dlspeed,
@@ -655,7 +743,7 @@ class DownloadController(QtCore.QObject):
                 if old_rt is None or old_rt != new_rt:
                     self._runtime[record.id] = new_rt
                     dirty_runtime_ids.add(record.id)
-                new_status = self._map_qbit_state(ti.state, file_progress, ti.dlspeed)
+                new_status = self._map_torrent_state(ti.state, file_progress, ti.dlspeed)
                 # Post-download records: only allow COMPLETED↔SEEDING
                 # transitions; never regress to DOWNLOADING or earlier.
                 if record.status in done_values:
@@ -677,7 +765,7 @@ class DownloadController(QtCore.QObject):
         done_vals = {s.value for s in DOWNLOAD_DONE_STATUSES}
         stale_ids = [
             rid for rid, rt in self._runtime.items()
-            if rt.qbit_hash not in snapshot_hashes
+            if rt.torrent_hash not in snapshot_hashes
             and any(
                 r.id == rid and (r.status in dead_vals or r.status in done_vals)
                 for records in records_by_hash.values()
@@ -720,7 +808,7 @@ class DownloadController(QtCore.QObject):
         self._schedule_torrent_submission(spec.torrent_name)
 
     def _schedule_torrent_submission(self, torrent_name: str) -> None:
-        if not self._app_state.qbit_state:
+        if not self._app_state.torrent_engine_state:
             # The native session was disconnected at startup and hasn't
             # been reconnected yet. The first successful monitor poll will
             # trigger _on_connection_changed(True) and submit queued records
@@ -758,12 +846,12 @@ class DownloadController(QtCore.QObject):
                 self._emit_changed()
                 return
 
-            existing_hash = next((r.qbit_hash for r, _ in group if r.qbit_hash), None)
+            existing_hash = next((r.torrent_hash for r, _ in group if r.torrent_hash), None)
             # Only include indices for active records — FAILED/CANCELLED/COMPLETED/SEEDING
-            # records should not have their files prioritized in qBittorrent.
+            # records should not have their files prioritized in the native libtorrent session.
             _active_values = {s.value for s in DOWNLOAD_ACTIVE_STATUSES}
             target_indices = sorted({
-                spec.qbit_file_index
+                spec.torrent_file_index
                 for record, spec in group
                 if record.status in _active_values
             })
@@ -787,14 +875,14 @@ class DownloadController(QtCore.QObject):
             self._output_dir.mkdir(parents=True, exist_ok=True)
 
             def operation() -> dict[str, object]:
-                client = self._logged_in_clone()
+                client = self._torrent_client()
                 torrent_hash = existing_hash or client.add_torrent_paused(
                     str(torrent_path), str(self._output_dir),
                 )
                 if not torrent_hash:
                     raise RuntimeError("Torrent accepted but no hash was found")
                 files = client.get_files(torrent_hash)
-                # Retry a few times if qBittorrent hasn't finished processing
+                # Retry a few times if libtorrent has not finished processing
                 # the torrent metadata yet (returns empty file list).
                 for _ in range(5):
                     if files:
@@ -818,14 +906,14 @@ class DownloadController(QtCore.QObject):
                 for rec, spec in group:
                     if rec.id not in group_ids:
                         continue
-                    if spec.qbit_file_index not in target_indices:
+                    if spec.torrent_file_index not in target_indices:
                         continue
                     dest_rel = romm_destination(self._output_dir, spec.system, spec.basename)
                     new_path = str(dest_rel.relative_to(self._output_dir))
                     # Find the torrent-internal path for this file index.
                     old_path = next(
                         (str(item.get("name", "")) for item in files
-                         if int(item.get("index", -1)) == spec.qbit_file_index),
+                         if int(item.get("index", -1)) == spec.torrent_file_index),
                         None,
                     )
                     if old_path:
@@ -868,7 +956,7 @@ class DownloadController(QtCore.QObject):
                         )
                     client.rename(torrent_hash, display_name)
                 except Exception as exc:
-                    log.warning("Could not rename torrent in qBittorrent: %s", exc)
+                    log.warning("Could not rename torrent in libtorrent session: %s", exc)
 
                 return {"hash": torrent_hash, "record_ids": group_ids}
 
@@ -885,17 +973,17 @@ class DownloadController(QtCore.QObject):
                         DownloadStatus.PAUSED.value,
                     }:
                         # PAUSED records: user paused manually — respect that;
-                        # just set the qbit_hash so we can track the torrent,
+                        # just set the torrent_hash so we can track the torrent,
                         # but keep the PAUSED status.
                         if current is not None and current.status == DownloadStatus.PAUSED.value:
                             self._state.update_queue_record(
-                                current.id, qbit_hash=torrent_hash, error=None,
+                                current.id, torrent_hash=torrent_hash, error=None,
                             )
                         continue
                     self._state.update_queue_record(
                         current.id,
                         status=DownloadStatus.DOWNLOADING.value,
-                        qbit_hash=torrent_hash,
+                        torrent_hash=torrent_hash,
                         error=None,
                     )
                 self._state.add_event(
@@ -912,7 +1000,7 @@ class DownloadController(QtCore.QObject):
                         self._state.update_queue_record(
                             current.id,
                             status=DownloadStatus.FAILED.value,
-                            qbit_hash=None,
+                            torrent_hash=None,
                             error=message,
                         )
                 self.error.emit(f"Could not start {torrent_name}: {message}")
@@ -947,7 +1035,12 @@ class DownloadController(QtCore.QObject):
         return parts[0], parts[1]
 
     def _submit_http(self, record: QueueRecord) -> None:
-        """Download a file from archive.org via HTTP streaming."""
+        """Download a file from archive.org via HTTP streaming.
+
+        Uses HttpJob (threading.Thread + generation token) instead of
+        QThreadPool so the transfer can be cancelled mid-stream.  Callbacks
+        are marshalled to the Qt main thread via QTimer.singleShot(0, ...).
+        """
         parsed = self._parse_source_ref(record.source_ref)
         if parsed is None:
             self._state.update_queue_record(
@@ -969,36 +1062,61 @@ class DownloadController(QtCore.QObject):
         )
         self._emit_changed()
 
+        generation = self._http_generations.get(record.id, 0) + 1
+        self._http_generations[record.id] = generation
+        job = HttpJob(record.id, generation)
+        self._http_jobs[record.id] = job
+
         def operation() -> Path:
             from minerva.services.http_download import HttpDownloadAdapter
 
-            adapter = HttpDownloadAdapter()
-            return adapter.download(url=url, destination=Path(record.destination))
-
-        def succeeded(result: object) -> None:
-            self._state.update_queue_record(
-                record.id,
-                status=DownloadStatus.COMPLETED.value,
-                error=None,
+            adapter = HttpDownloadAdapter(cancel_event=job._cancelled)
+            return adapter.download(
+                url=url,
+                destination=Path(record.destination),
+                expected_size=record.expected_size,
             )
-            self._state.add_event("download", f"Completed HTTP download: {record.source_ref}")
-            self._emit_changed()
 
-        def failed(message: str) -> None:
-            self._state.update_queue_record(
-                record.id,
-                status=DownloadStatus.FAILED.value,
-                error=message,
-            )
-            self.error.emit(f"HTTP download failed: {message}")
-            self._emit_changed()
+        def worker_main() -> None:
+            try:
+                result = operation()
+                self._http_succeeded.emit(record.id, generation, result)
+            except Exception as exc:
+                log.exception("HTTP download operation failed")
+                self._http_failed.emit(record.id, generation, str(exc))
 
-        self._run_task(operation, succeeded, failed)
+        job.start(worker_main)
+
+    def _on_http_succeeded(self, record_id: str, generation: int, result: object) -> None:
+        """Handle HTTP download success on the main thread."""
+        if generation != self._http_generations.get(record_id, 0):
+            return  # stale worker — record was retried/removed
+        self._http_jobs.pop(record_id, None)
+        self._state.update_queue_record(
+            record_id,
+            status=DownloadStatus.COMPLETED.value,
+            error=None,
+        )
+        self._state.add_event("download", f"Completed HTTP download: {record_id[:8]}")
+        self._emit_changed()
+
+    def _on_http_failed(self, record_id: str, generation: int, message: str) -> None:
+        """Handle HTTP download failure on the main thread."""
+        if generation != self._http_generations.get(record_id, 0):
+            return  # stale worker
+        self._http_jobs.pop(record_id, None)
+        self._state.update_queue_record(
+            record_id,
+            status=DownloadStatus.FAILED.value,
+            error=message,
+        )
+        self.error.emit(f"HTTP download failed: {message}")
+        self._emit_changed()
 
     # ── Archive.org torrent download ────────────────────────────────────
 
     def _submit_archive_org_torrent(self, record: QueueRecord) -> None:
-        """Download via archive.org's torrent file using qBittorrent."""
+        """Download via archive.org's torrent file using the native libtorrent session."""
         parsed = self._parse_source_ref(record.source_ref)
         if parsed is None:
             self._state.update_queue_record(
@@ -1009,7 +1127,11 @@ class DownloadController(QtCore.QObject):
             self._emit_changed()
             return
         identifier, filename = parsed
-        torrent_url = f"https://archive.org/download/{identifier}/{identifier}_archive.torrent"
+        # Use torrent_url from the record if available (populated by
+        # queue_entries); fall back to constructing it from the identifier.
+        torrent_url = record.torrent_url or (
+            f"https://archive.org/download/{identifier}/{identifier}_archive.torrent"
+        )
 
         self._state.update_queue_record(
             record.id,
@@ -1023,7 +1145,7 @@ class DownloadController(QtCore.QObject):
             import tempfile
             from pathlib import PurePosixPath
 
-            client = self._logged_in_clone()
+            client = self._torrent_client()
             response = requests.get(torrent_url, timeout=30)
             response.raise_for_status()
             with tempfile.NamedTemporaryFile(
@@ -1049,7 +1171,12 @@ class DownloadController(QtCore.QObject):
                 time.sleep(0.5)
                 files = client.get_files(torrent_hash)
 
-            target_basename = PurePosixPath(filename).name.lower()
+            # Use torrent_member_path for exact match if available;
+            # fall back to source_ref filename. Compare full normalized
+            # POSIX member paths, not just basenames, to avoid matching
+            # the wrong duplicate filename in a different directory.
+            target_member = record.torrent_member_path or filename
+            target_norm = str(PurePosixPath(target_member)).lstrip("./").casefold()
             target_index = None
             all_indices = []
             target_old_path: str | None = None
@@ -1057,19 +1184,25 @@ class DownloadController(QtCore.QObject):
                 idx = int(item.get("index", -1))
                 if idx >= 0:
                     all_indices.append(idx)
-                item_basename = str(item.get("name", "")).rsplit("/", 1)[-1].lower()
-                if item_basename == target_basename:
+                item_name = str(item.get("name", ""))
+                item_norm = str(PurePosixPath(item_name)).lstrip("./").casefold()
+                if item_norm == target_norm:
                     target_index = idx
-                    target_old_path = str(item.get("name", ""))
+                    target_old_path = item_name
 
             if target_index is None:
-                target_index = all_indices[0] if all_indices else 0
-                target_old_path = next(
-                    (str(item.get("name", "")) for item in files
-                     if int(item.get("index", -1)) == target_index),
-                    None,
+                # Fail closed: don't download the wrong file.
+                # Clean up the torrent we just added to avoid orphaning it.
+                try:
+                    client.delete_torrent(torrent_hash, delete_files=False)
+                except Exception:
+                    log.warning(
+                        "Could not delete orphaned torrent %s after member not found",
+                        torrent_hash[:8],
+                    )
+                raise FileNotFoundError(
+                    f"Target file '{target_member}' not found in archive.org torrent"
                 )
-                log.warning("Could not find %s in archive.org torrent, using first file", filename)
 
             client.set_file_priority(torrent_hash, all_indices, 0)
             client.set_file_priority(torrent_hash, [target_index], 1)
@@ -1096,7 +1229,7 @@ class DownloadController(QtCore.QObject):
             self._state.update_queue_record(
                 record.id,
                 status=DownloadStatus.DOWNLOADING.value,
-                qbit_hash=torrent_hash,
+                torrent_hash=torrent_hash,
                 error=None,
             )
             self._state.add_event("download", f"Started archive.org torrent: {identifier}")
@@ -1114,8 +1247,6 @@ class DownloadController(QtCore.QObject):
 
         self._run_task(operation, succeeded, failed)
 
-    # ── Completion / exposure ────────────────────────────────────────────
-
     def _schedule_completed_file(
         self,
         record: QueueRecord,
@@ -1125,6 +1256,63 @@ class DownloadController(QtCore.QObject):
         with self._sets_lock:
             if record.id in self._linking_records:
                 return
+
+        # Archive.org torrent records have file_id=0 and no local index
+        # spec. Validate completion using the destination file directly,
+        # checking expected_size if available.
+        is_archive_org = record.source in (
+            DownloadSource.ARCHIVE_ORG_TORRENT.value,
+            DownloadSource.ARCHIVE_ORG_HTTP.value,
+        )
+        if is_archive_org:
+            with self._sets_lock:
+                self._linking_records.add(record.id)
+
+            def ao_operation() -> Path:
+                destination = Path(record.destination)
+                if not destination.is_file():
+                    raise FileNotFoundError(
+                        f"Downloaded file not found at {destination}"
+                    )
+                if record.expected_size is not None and record.expected_size > 0:
+                    actual_size = destination.stat().st_size
+                    if actual_size != record.expected_size:
+                        raise OSError(
+                            f"Downloaded size mismatch: expected "
+                            f"{record.expected_size}, got {actual_size}"
+                        )
+                return destination
+
+            def ao_succeeded(result: object) -> None:
+                destination = Path(result)
+                self._state.update_queue_record(
+                    record.id,
+                    status=final_status.value,
+                    error=None,
+                )
+                self._state.add_event("complete", f"Ready: {destination}")
+                self.activity_event.emit("check", f"Completed {destination.name}")
+                self._emit_changed()
+                if record.torrent_hash:
+                    self._maybe_delete_completed_torrent(record.torrent_hash)
+
+            def ao_failed(message: str) -> None:
+                self._state.update_queue_record(
+                    record.id,
+                    status=DownloadStatus.FAILED.value,
+                    error=message,
+                )
+                self.error.emit(f"Completion failed: {message}")
+                self._emit_changed()
+
+            def ao_finished() -> None:
+                with self._sets_lock:
+                    self._linking_records.discard(record.id)
+
+            self._run_task(ao_operation, ao_succeeded, ao_failed, ao_finished)
+            return
+
+        # Minerva torrent path: resolve spec from local index
         spec = self._resolve_spec(record.file_id)
         if spec is None:
             self._state.update_queue_record(
@@ -1189,28 +1377,11 @@ class DownloadController(QtCore.QObject):
             self.activity_event.emit("check", f"Completed {destination.name}")
             self._emit_changed()
             # Remove torrent from session if no active or seeding records remain.
-            if record.qbit_hash:
-                siblings = [
-                    r for r in self._state.list_queue()
-                    if r.qbit_hash == record.qbit_hash
-                ]
-                still_active = any(
-                    r.status in {s.value for s in DOWNLOAD_ACTIVE_STATUSES}
-                    or r.status == DownloadStatus.SEEDING.value
-                    for r in siblings
-                )
-                if not still_active:
-                    torrent_hash = record.qbit_hash
-                    self._run_qbit_task(
-                        lambda: self._logged_in_clone().delete_torrent(
-                            torrent_hash, delete_files=False,
-                        ),
-                        lambda _result: None,
-                        "Could not remove completed torrent",
-                    )
+            if record.torrent_hash:
+                self._maybe_delete_completed_torrent(record.torrent_hash)
 
         def failed(message: str) -> None:
-            record_hash = record.qbit_hash
+            record_hash = record.torrent_hash
             self._state.update_queue_record(
                 record.id,
                 status=DownloadStatus.FAILED.value,
@@ -1220,11 +1391,11 @@ class DownloadController(QtCore.QObject):
             if record_hash:
                 siblings = [
                     r for r in self._state.list_queue()
-                    if r.id != record.id and r.qbit_hash == record_hash
+                    if r.id != record.id and r.torrent_hash == record_hash
                 ]
                 if not siblings:
-                    self._run_qbit_task(
-                        lambda: self._logged_in_clone().delete_torrent(
+                    self._run_torrent_task(
+                        lambda: self._torrent_client().delete_torrent(
                             record_hash, delete_files=False,
                         ),
                         lambda _result: None,
@@ -1240,9 +1411,34 @@ class DownloadController(QtCore.QObject):
 
         self._run_task(operation, succeeded, failed, finished)
 
+    def _maybe_delete_completed_torrent(self, torrent_hash: str) -> None:
+        """Remove a torrent from the session if no active/seeding records remain."""
+        siblings = [
+            r for r in self._state.list_queue()
+            if r.torrent_hash == torrent_hash
+        ]
+        still_active = any(
+            r.status in {s.value for s in DOWNLOAD_ACTIVE_STATUSES}
+            or r.status == DownloadStatus.SEEDING.value
+            for r in siblings
+        )
+        if not still_active:
+            self._run_torrent_task(
+                lambda: self._torrent_client().delete_torrent(
+                    torrent_hash, delete_files=False,
+                ),
+                lambda _result: None,
+                "Could not remove completed torrent",
+            )
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def _resolve_spec(self, file_id: int) -> DownloadFileSpec | None:
+        # file_id=0 is used as a sentinel for non-Minerva sources
+        # (archive.org HTTP/torrent). These records have no local
+        # index entry and should not hit the DB.
+        if file_id <= 0:
+            return None
         if file_id in self._spec_cache:
             return self._spec_cache[file_id]
         if self.file_spec_resolver is None:
@@ -1311,13 +1507,13 @@ class DownloadController(QtCore.QObject):
         """Drop the spec cache when the index is rebuilt."""
         self._spec_cache.clear()
 
-    def _logged_in_clone(self) -> NativeTorrentSession:
+    def _torrent_client(self) -> NativeTorrentSession:
         client = self._client.clone()
         client.login()
         return client
 
     def _records_for_hash(self, torrent_hash: str) -> list[QueueRecord]:
-        return [r for r in self._state.list_queue() if r.qbit_hash == torrent_hash]
+        return [r for r in self._state.list_queue() if r.torrent_hash == torrent_hash]
 
     def _get_record(self, record_id: str) -> QueueRecord | None:
         return next((r for r in self._state.list_queue() if r.id == record_id), None)
@@ -1338,8 +1534,8 @@ class DownloadController(QtCore.QObject):
 
     def _sync_monitor_hashes(self) -> None:
         hashes = {
-            r.qbit_hash for r in self.get_active_records()
-            if r.qbit_hash
+            r.torrent_hash for r in self.get_active_records()
+            if r.torrent_hash
         }
         self._monitor_hashes_requested.emit(hashes)
     def _get_cached_queue(self) -> list[QueueRecord]:
@@ -1368,23 +1564,22 @@ class DownloadController(QtCore.QObject):
             self.runtime_dirty.emit(dirty_ids)
 
     @classmethod
-    def _map_qbit_state(
+    def _map_torrent_state(
         cls, raw_state: str, progress: float, dlspeed: int = 0,
     ) -> DownloadStatus:
+        if raw_state == "error":
+            return DownloadStatus.FAILED
         if progress >= 1.0:
             if raw_state in cls._ACTIVE_UPLOAD_STATES:
                 return DownloadStatus.SEEDING
             return DownloadStatus.COMPLETED
-        # pausedUP with progress < 1.0 — could be a transient state
-        # where the torrent has partial data. If actively downloading,
-        # treat as downloading, not paused.
-        if raw_state == "pausedUP":
+        if raw_state == "paused":
             if dlspeed > 0:
                 return DownloadStatus.DOWNLOADING
             return DownloadStatus.PAUSED
-        return cls._QBT_STATUS_MAP.get(raw_state, DownloadStatus.DOWNLOADING)
+        return cls._TORRENT_STATUS_MAP.get(raw_state, DownloadStatus.DOWNLOADING)
 
-    def _run_qbit_task(
+    def _run_torrent_task(
         self,
         operation: Callable[[], object],
         succeeded: Callable[[object], None],

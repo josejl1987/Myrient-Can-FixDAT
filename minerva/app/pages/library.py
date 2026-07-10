@@ -317,8 +317,8 @@ class LibraryPage(BasePage):
 
     def _build_root_layout(self) -> None:
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 18, 24, 18)
-        root.setSpacing(12)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(14)
         root.addWidget(self._header)
         root.addWidget(self._toolbar)
         root.addWidget(self._active_filters)
@@ -613,7 +613,7 @@ class LibraryPage(BasePage):
             NotificationBanner.show_error(
                 self,
                 "Downloads unavailable",
-                "qBittorrent controller is not initialised",
+                "native torrent engine controller is not initialised",
             )
             return
         output_root = Path(self._settings.value("output_dir", "downloads", str))

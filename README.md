@@ -3,14 +3,14 @@
 > **Myrient** shut down on 31 March 2026.
 > The **Minerva Archive** (https://minerva-archive.org/browse/) is its successor, run by the same team, but uses **torrents** instead of direct HTTP downloads.
 
-A GUI tool that downloads missing ROMs from the **Minerva Archive** via **qBittorrent**. Point it at your **RomVault fix report** or a **DAT file**, and it will download only what you're missing — using the 1050 `.torrent` files covering No-Intro, Redump, MAME, and more. Also searches **archive.org** as a parallel source for files not in the Minerva index.
+A GUI tool that downloads missing ROMs from the **Minerva Archive** via native **libtorrent**. Point it at your **RomVault fix report** or a **DAT file**, and it will download only what you're missing — using the 1050 `.torrent` files covering No-Intro, Redump, MAME, and more. Also searches **archive.org** as a parallel source for files not in the Minerva index.
 
 ## Features
 
 - **Smart Downloads** — Load a RomVault fix report (.csv or fix .dat), auto-match against the Minerva torrent index, preview matches with confidence scoring, and queue missing games
 - **No-Intro, Redump, RetroAchievements DAT Support** — Load any standard DAT; fuzzy-matches game names against the torrent index
 - **RomVault Fix Reports** — Native support for CSV and Fix DAT formats
-- **qBittorrent downloads** — Uses qBittorrent's Web API for selective-file torrent downloads (individual files from multi-file torrents)
+- **Native libtorrent downloads** — Uses in-process libtorrent bindings for selective-file torrent downloads (individual files from multi-file torrents)
 - **Archive.org Source** — Searches archive.org for files not in the Minerva index; downloads via torrent when available, falls back to HTTP streaming
 - **Match Review** — Interactive review screen to accept/reject fuzzy matches before queuing
 - **Download Dashboard** — Live progress, speed, ETA, seeds, ratio per torrent; pause/resume individual files
@@ -23,13 +23,10 @@ A GUI tool that downloads missing ROMs from the **Minerva Archive** via **qBitto
 ### Prerequisites
 
 ```bash
-pip install PyQt5
+pip install ".[dev]"
 ```
 
-**qBittorrent** is required for downloads. The tool connects via its Web API:
-- Install qBittorrent (https://www.qbittorrent.org/)
-- Enable Web UI in qBittorrent: Tools → Preferences → Web UI → enable "Web User Interface"
-- Default: `http://localhost:8080` with user `admin` / `adminadmin`
+The native libtorrent Python bindings are required for downloads and are included in the project dependency list. No external torrent client or Web UI is required.
 
 ### 1. Clone & Set Up
 
@@ -93,7 +90,7 @@ Type in the search bar — searches all 2.4M files in real-time. Filter by Colle
 - View live status of all queued torrents (downloading, seeding, paused, error)
 - Per-file progress, download speed, ETA, seeds, peer count, ratio
 - Actions column: start, pause, remove individual torrents
-- Matches flow through from Match Review → Download Controller → qBittorrent
+- Matches flow through from Match Review → Download Controller → native libtorrent session
 - Completed files are exposed to your library directory (hardlink or copy)
 
 ## Architecture
@@ -102,7 +99,7 @@ Type in the search bar — searches all 2.4M files in real-time. Filter by Colle
 minerva/
 ├── app/                    # Application layer
 │   ├── shell.py            # Main window (QMainWindow) — top-level app shell
-│   ├── download_controller.py  # Download orchestration — QbitMonitor,
+│   ├── download_controller.py  # Download orchestration — NativeMonitor,
 │   │                         #   queue management, file exposure, signals
 │   ├── domain/             # Pure domain types (dataclasses, enums)
 │   │   ├── downloads.py    #   QueueRecord, DownloadRuntime, DownloadStatus
@@ -129,7 +126,7 @@ minerva/
 ├── services/               # Multi-source download services
 │   ├── archive_org.py     # Archive.org search client + candidate provider
 │   └── http_download.py   # HTTP streaming adapter with rate-limit retry
-├── app/minerva_qbit.py     # qBittorrent Web API wrapper
+├── native_torrent.py      # In-process libtorrent session wrapper
 ├── app/minerva_state.py    # Global application state
 ├── minerva_gui.py          # Legacy entry point (delegates to shell)
 ├── minerva_cli.py          # CLI tool (index, search, find, download)
@@ -161,9 +158,9 @@ tests/
 ```
 DAT/Fix Report → CandidateProvider ──→ MatchReviewPage → DownloadController
                  ├─ Minerva (match_dat_detailed)                    ↓
-                 └─ Archive.org (search_items, get_item)    QbitMonitor (thread)
-                                                             ├─ Minerva torrent → qBittorrent Web API
-                                                             ├─ archive.org torrent → qBittorrent
+                 └─ Archive.org (search_items, get_item)    NativeMonitor (thread)
+                                                             ├─ Minerva torrent → native libtorrent session
+                                                             ├─ archive.org torrent → native libtorrent session
                                                              └─ archive.org HTTP → HttpDownloadAdapter (stream)
                                                                      ↓
                                                              File exposure (hardlink/copy)
@@ -178,8 +175,8 @@ python minerva_cli.py index
 # Search for games
 python minerva_cli.py find "Tetris"
 
-# Download a single game (headless qBittorrent)
-python minerva_cli.py download "Tetris DX (World) (SGB Enhanced) (GB Compatible)"
+# Download a single game (headless native libtorrent)
+python minerva_cli.py download 12345 --dest downloads
 
 # List all torrents by collection
 python minerva_cli.py list
@@ -223,7 +220,7 @@ The matching pipeline normalizes all these differences via:
 - [No-Intro](https://no-intro.org/) — Cartridge preservation
 - [Redump](http://redump.org/) — Disc preservation
 - [autobrr/mkbrr](https://github.com/autobrr/mkbrr) — Torrent creation tool used by Minerva
-- [qBittorrent](https://www.qbittorrent.org/) — Torrent download engine
+- [libtorrent](https://libtorrent.org/) — Native torrent engine
 
 ## License
 

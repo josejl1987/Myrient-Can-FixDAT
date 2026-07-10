@@ -19,3 +19,16 @@ QLabel#panelHeaderTitle {
     font-size: 13px;
     font-weight: 600;
 }
+QPushButton#panelHeaderButton {
+    background: transparent;
+    color: {{token.text_muted}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 3px 8px;
+    font-size: 11px;
+}
+QPushButton#panelHeaderButton:hover {
+    background: {{token.surface_raised}};
+    color: {{token.text}};
+    border-color: {{token.accent}};
+}

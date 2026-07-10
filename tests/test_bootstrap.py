@@ -59,16 +59,33 @@ class TestResourceRoot:
 class TestCreateMainWindow:
     def test_returns_main_window(self, qtbot, monkeypatch, tmp_path):
         """GIVEN the bootstrap helper WHEN called THEN it returns an AppShell."""
+        # Isolate QSettings to a temp directory so test data never leaks
+        # into the user's real config.
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+        old_format = QtCore.QSettings.defaultFormat()
         QtCore.QSettings.setDefaultFormat(QtCore.QSettings.Format.IniFormat)
-        settings = QtCore.QSettings("MinervaFixDAT", "MinervaGUI")
-        settings.setValue("state_db_path", str(tmp_path / "state.db"))
-        settings.setValue("index_path", str(tmp_path / "index.db"))
+        try:
+            settings = QtCore.QSettings("MinervaFixDAT_test", "MinervaGUI_test")
+            settings.setValue("state_db_path", str(tmp_path / "state.db"))
+            settings.setValue("index_path", str(tmp_path / "index.db"))
+            settings.sync()
 
-        win = create_main_window()
-        qtbot.addWidget(win)
-        assert win is not None
-        assert win.__class__.__name__ == "AppShell"
+            # Patch AppShell to use the test-scoped QSettings org/app.
+            import minerva.app.shell as shell_mod
+            original_shell = shell_mod.AppShell
+            monkeypatch.setattr(
+                shell_mod, "AppShell",
+                lambda *a, **kw: original_shell(
+                    *a, settings_org="MinervaFixDAT_test",
+                    settings_app="MinervaGUI_test", **kw,
+                ),
+            )
+            win = create_main_window()
+            qtbot.addWidget(win)
+            assert win is not None
+            assert win.__class__.__name__ == "AppShell"
+        finally:
+            QtCore.QSettings.setDefaultFormat(old_format)
 
 
 class _FakeQApplication:

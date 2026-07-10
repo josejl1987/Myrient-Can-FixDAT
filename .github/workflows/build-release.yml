@@ -23,7 +23,7 @@ jobs:
       
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt lxml pyinstaller
+          pip install ".[dev]" lxml pyinstaller
       
       - name: Build executable
         run: |

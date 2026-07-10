@@ -68,3 +68,11 @@ class PageRegistry(QtCore.QObject):
     def iter_constructed(self) -> Iterable[QtWidgets.QWidget]:
         """Yield all pages that have been constructed so far."""
         return iter(self._cache.values())
+
+    def iter_cached_items(self) -> Iterable[tuple[PageId, QtWidgets.QWidget]]:
+        """Yield ``(page_id, page)`` pairs for all constructed pages."""
+        return iter(self._cache.items())
+
+    def get_cached(self, page_id: PageId) -> QtWidgets.QWidget | None:
+        """Return the cached page for *page_id*, or ``None`` if not yet constructed."""
+        return self._cache.get(page_id)

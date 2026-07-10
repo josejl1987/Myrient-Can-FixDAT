@@ -1,8 +1,8 @@
-"""Native torrent session backed by libtorrent — replaces qBittorrent dependency.
+"""Native torrent session backed by libtorrent.
 
-This module provides a drop-in replacement for :class:`QBittorrentClient`
-that uses libtorrent's Python bindings directly.  No external daemon is
-required — the torrent engine runs in-process.
+This module is Minerva's only torrent backend. It uses libtorrent's Python
+bindings directly, with no external torrent daemon, Web API, or external torrent client
+involved.
 
 Seeding policy is enforced per-torrent via libtorrent's
 ``seed_time_limit`` and ``share_ratio_limit`` settings, so users cannot
@@ -33,7 +33,13 @@ import threading
 import time
 from pathlib import Path
 
-import libtorrent as lt
+try:
+    import libtorrent as lt
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised in unprovisioned envs
+    lt = None  # type: ignore[assignment]
+    _LIBTORRENT_IMPORT_ERROR: ModuleNotFoundError | None = exc
+else:
+    _LIBTORRENT_IMPORT_ERROR = None
 
 log = logging.getLogger(__name__)
 
@@ -45,9 +51,6 @@ class NativeTorrentError(RuntimeError):
 class NativeTorrentSession:
     """In-process torrent session backed by libtorrent.
 
-    Implements the same method signatures as :class:`QBittorrentClient`
-    so it can be used as a drop-in replacement in :class:`DownloadController`.
-
     Seeding policy:
         * ``seed_ratio`` — target share ratio (default 2.0).  When a torrent
           reaches this ratio, it is auto-paused.
@@ -57,7 +60,7 @@ class NativeTorrentSession:
         * ``max_active_seeds`` — concurrent seeding torrents (default 5).
     """
 
-    # ── Priority constants (match qBittorrent API) ─────────────────────
+    # ── Priority constants ─────────────────────────────────────────────
     PRIORITY_SKIP = 0
     PRIORITY_NORMAL = 1
     PRIORITY_HIGH = 6
@@ -93,6 +96,7 @@ class NativeTorrentSession:
 
     def start(self) -> None:
         """Create the libtorrent session and start the alert pump thread."""
+        self._require_libtorrent()
         with self._lock:
             if self._session is not None:
                 return
@@ -155,7 +159,7 @@ class NativeTorrentSession:
             self._handles.clear()
             self._status_cache.clear()
         log.info("NativeTorrentSession stopped")
-    # ── QBittorrentClient-compatible API ────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────
 
     @property
     def is_logged_in(self) -> bool:
@@ -173,7 +177,8 @@ class NativeTorrentSession:
         return True
 
     def test_connection(self) -> str:
-        """Return a version string for compatibility."""
+        """Return the loaded libtorrent version string."""
+        self._require_libtorrent()
         return f"libtorrent {lt.__version__}"
 
     def add_torrent_paused(
@@ -498,7 +503,7 @@ class NativeTorrentSession:
             try:
                 # Request delta updates from libtorrent every cycle.
                 # libtorrent will emit state_update_alert with only
-                # changed torrents (research: qBittorrent/Transmission pattern).
+                # changed torrents (research: libtorrent/Transmission pattern).
                 if update_counter % 2 == 0:
                     session.post_torrent_updates(
                         lt.status_flags_t.query_pieces | lt.status_flags_t.query_accurate_download_counters
@@ -571,7 +576,17 @@ class NativeTorrentSession:
         except Exception:
             log.warning("Failed to write resume data", exc_info=True)
 
+    @staticmethod
+    def _require_libtorrent() -> None:
+        if lt is None:
+            raise NativeTorrentError(
+                "libtorrent Python bindings are not installed. "
+                "Install the project dependencies, including libtorrent, "
+                "before using the native torrent engine."
+            ) from _LIBTORRENT_IMPORT_ERROR
+
     def _ensure_session(self) -> None:
+        self._require_libtorrent()
         if self._session is None:
             self.start()
         if self._session is None:
@@ -582,24 +597,21 @@ class NativeTorrentSession:
             return self._handles.get(torrent_hash)
 
     def _status_to_dict(self, status: lt.torrent_status, info_hash: str) -> dict:
-        """Convert libtorrent torrent_status to a dict matching qBittorrent API."""
+        """Convert a libtorrent torrent_status into Minerva telemetry."""
         state_map = {
-            lt.torrent_status.checking_files: "checkingDL",
-            lt.torrent_status.downloading_metadata: "metaDL",
+            lt.torrent_status.checking_files: "checking",
+            lt.torrent_status.downloading_metadata: "metadata",
             lt.torrent_status.downloading: "downloading",
-            lt.torrent_status.finished: "pausedUP",
-            lt.torrent_status.seeding: "uploading",
+            lt.torrent_status.finished: "completed",
+            lt.torrent_status.seeding: "seeding",
             lt.torrent_status.allocating: "allocating",
-            lt.torrent_status.checking_resume_data: "checkingResumeData",
+            lt.torrent_status.checking_resume_data: "checking_resume",
         }
         raw_state = state_map.get(status.state, "unknown")
-        # libtorrent keeps status.state as-is when paused; check the paused
-        # flag to report the correct qBittorrent-equivalent state.
-        if status.paused:
-            if status.state in (lt.torrent_status.finished, lt.torrent_status.seeding):
-                raw_state = "pausedUP"
-            else:
-                raw_state = "pausedDL"
+        if getattr(status, "errc", None):
+            raw_state = "error"
+        elif status.paused:
+            raw_state = "completed" if status.progress >= 1.0 else "paused"
         if status.all_time_download > 0:
             seed_ratio = float(status.all_time_upload / status.all_time_download)
         else:
@@ -639,6 +651,7 @@ class NativeTorrentSession:
     def compute_info_hash(torrent_path: Path) -> str | None:
         """Compute the v1 info-hash of a .torrent file."""
         try:
+            NativeTorrentSession._require_libtorrent()
             ti = lt.torrent_info(str(torrent_path))
             return str(ti.info_hash())
         except Exception:

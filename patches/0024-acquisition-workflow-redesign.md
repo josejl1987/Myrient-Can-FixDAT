@@ -187,7 +187,7 @@ class AcquisitionPlanner:
 
 The planner:
 
-1. Resolves the seed directory (`settings.value("qbit/save_path")`) and output directory (`settings.value("downloads/output_dir")`).
+1. Resolves the seed directory (`settings.value("downloads/save_path")`) and output directory (`settings.value("downloads/output_dir")`).
 2. Probes each with `shutil.disk_usage`.
 3. Detects whether the two paths are on the same filesystem (compare `os.stat(...).st_dev` after resolving both).
 4. Tests hardlink feasibility once (try `os.link` on a temp file in the seed dir pointing at a temp file in the output dir, fall back to copy).

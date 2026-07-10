@@ -12,6 +12,8 @@ import enum
 from dataclasses import dataclass
 from pathlib import Path
 
+from minerva.domain.sources import DownloadSource
+
 
 class ResolutionState(enum.Enum):
     READY = "ready"                     # safe exact / strong unique match — auto-accept
@@ -46,6 +48,10 @@ class MatchMethod(str, enum.Enum):
     KEYWORD = "keyword"
     FUZZY = "fuzzy"
 
+
+def is_approved(entry: "ReviewEntry") -> bool:
+    """Return True if *entry* is approved for queuing."""
+    return entry.decision in {Decision.ACCEPT.value, Decision.FUZZY.value}
 
 @dataclass(frozen=True)
 class MatchPolicy:
@@ -89,6 +95,20 @@ class QueueResult:
             skipped_missing=sum(r.skipped_missing for r in results),
         )
 
+@dataclass(frozen=True)
+class QueueItemSpec:
+    """Source-aware specification for one queue record."""
+
+    report_entry_id: str
+    source: "DownloadSource"
+    source_identity: str | None = None
+    local_file_id: int | None = None
+    destination: Path | None = None
+    report_id: str | None = None
+    expected_size: int | None = None
+    expected_hash: str | None = None
+    torrent_url: str | None = None
+    torrent_member_path: str | None = None
 @dataclass(frozen=True)
 class FolderImportSummary:
     imported: int

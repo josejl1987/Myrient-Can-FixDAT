@@ -21,7 +21,7 @@ from minerva.domain.reports import ReviewEntry
 from minerva.domain.sources import DownloadSource
 from minerva.services.archive_org import ArchiveOrgCandidateProvider
 from minerva.ui.icons import Icons
-from minerva_db import DatEntry
+from minerva.parsers.dat_parser import DatEntry
 
 log = logging.getLogger(__name__)
 
@@ -65,21 +65,23 @@ _SYSTEM_TO_CDR_SLUG = {
 
 def _source_badge(source: DownloadSource) -> str:
     """Return an HTML badge string for a candidate source."""
+    from minerva.ui.theme import ThemeTokens
+    t = ThemeTokens()
     badges = {
         DownloadSource.MINERVA_TORRENT: (
-            '<span style="background:#3b82f6;color:white;padding:1px 6px;'
-            'border-radius:3px;font-size:10px;">Minerva</span>'
+            f'<span style="background:{t.info_fg};color:white;padding:1px 6px;'
+            f'border-radius:{t.radius_sm};font-size:10px;">Minerva</span>'
         ),
         DownloadSource.ARCHIVE_ORG_TORRENT: (
-            '<span style="background:#22c55e;color:white;padding:1px 6px;'
-            'border-radius:3px;font-size:10px;">archive.org \U0001f310</span>'
+            f'<span style="background:{t.success};color:white;padding:1px 6px;'
+            f'border-radius:{t.radius_sm};font-size:10px;">archive.org \U0001f310</span>'
         ),
         DownloadSource.ARCHIVE_ORG_HTTP: (
-            '<span style="background:#f97316;color:white;padding:1px 6px;'
-            'border-radius:3px;font-size:10px;">archive.org \u2b07</span>'
+            f'<span style="background:{t.warning};color:white;padding:1px 6px;'
+            f'border-radius:{t.radius_sm};font-size:10px;">archive.org \u2b07</span>'
         ),
     }
-    return badges.get(source, '<span style="color:#888;">unknown</span>')
+    return badges.get(source, f'<span style="color:{t.text_muted};">unknown</span>')
 
 
 class _TaskSignals(QtCore.QObject):
@@ -104,6 +106,8 @@ class _MatchSearchTask(QtCore.QRunnable):
         dat: object,
         system: str,
         automatic_file_id: int | None,
+        *,
+        ao_executor: object | None = None,
     ) -> None:
         super().__init__()
         self._provider = provider
@@ -111,6 +115,7 @@ class _MatchSearchTask(QtCore.QRunnable):
         self._system = system
         self._automatic_file_id = automatic_file_id
         self.signals = _TaskSignals()
+        self._ao_executor = ao_executor
         # Extract the DB path so the worker thread can open its own connection
         # — sharing a MinervaDB across threads causes "database is locked"
         db_path = getattr(db, '_path', None) or getattr(db, 'index_path', None)
@@ -161,32 +166,29 @@ class _MatchSearchTask(QtCore.QRunnable):
                     }
 
             # ── Archive.org candidates (network call with 8s timeout) ──
-            # The internetarchive library has no built-in timeout — wrap it
-            # in a sub-thread with a join deadline so a hung network call
-            # doesn't block the thread pool forever.
-            import threading as _threading
+            # Use the panel-injected executor (shared across searches) to
+            # prevent thread accumulation. Staleness is handled by the
+            # panel's generation check in on_succeeded/on_failed.
+            import concurrent.futures
             ao_candidates: list = []
-            ao_error: Exception | None = None
             ao_status: str = "ok"
-
-            def _run_archive_search() -> None:
-                nonlocal ao_candidates, ao_error
+            if self._ao_executor is not None:
                 try:
-                    ao_candidates = self._provider.search(self._dat, self._system)
+                    future = self._ao_executor.submit(self._provider.search, self._dat, self._system)
+                    ao_candidates = future.result(timeout=8.0)
+                except concurrent.futures.TimeoutError:
+                    log.warning("Archive.org search timed out after 8s — skipping")
+                    ao_status = "timeout"
+                    ao_candidates = []
+                    future.cancel()
                 except Exception as e:
-                    ao_error = e
+                    log.debug("Archive.org search failed: %s", e)
+                    ao_status = "error"
+                    ao_candidates = []
+            else:
+                ao_status = "skipped"
+                ao_candidates = []
 
-            ao_thread = _threading.Thread(target=_run_archive_search, daemon=True)
-            ao_thread.start()
-            ao_thread.join(timeout=8.0)
-            if ao_thread.is_alive():
-                log.warning("Archive.org search timed out after 8s — skipping")
-                ao_status = "timeout"
-                ao_candidates = []
-            elif ao_error is not None:
-                log.debug("Archive.org search failed: %s", ao_error)
-                ao_status = "error"
-                ao_candidates = []
 
             result = {
                 "minerva": minerva_rows,
@@ -235,6 +237,8 @@ class MatchDetailPanel(QtWidgets.QWidget):
     ) -> None:
         super().__init__(parent)
         self._app_state = app_state
+        from minerva.ui.theme import ThemeTokens
+        self._tokens = ThemeTokens()
         self._current_report_id: str | None = None
         self._current_entry_id: str | None = None
         self._current_system: str | None = None
@@ -244,11 +248,26 @@ class MatchDetailPanel(QtWidgets.QWidget):
         from minerva_db import MinervaDB
         self._db = MinervaDB()
         self._running_tasks: set[_MatchSearchTask] = set()
-
+        # Bounded executor for archive.org searches — reused across all
+        # _MatchSearchTask instances to prevent thread accumulation (P2-4).
+        import concurrent.futures
+        self._ao_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self._ao_generation = 0
         self.setObjectName("matchDetailPanel")
         self.setMinimumWidth(310)
 
         self._build_ui()
+        self.destroyed.connect(self._shutdown_executor)
+
+    def _shutdown_executor(self, *args) -> None:
+        """Shut down the archive.org search executor on panel destruction."""
+        if not getattr(self, "_ao_executor_shutdown", False):
+            self._ao_executor_shutdown = True
+            try:
+                self._ao_executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                # Python <3.9: cancel_futures not supported
+                self._ao_executor.shutdown(wait=False)
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -305,22 +324,26 @@ class MatchDetailPanel(QtWidgets.QWidget):
         # Launch combined search on a worker thread
         dat = DatEntry(filename=entry.filename, size=entry.size)
         scope_system = system or ""
+        self._ao_generation += 1
+        my_generation = self._ao_generation
         task = _MatchSearchTask(
             self._db, self._archive_org_provider, dat, scope_system,
             entry.automatic_file_id,
+            ao_executor=self._ao_executor,
         )
         entry_id = entry.id
         automatic_file_id = entry.automatic_file_id
 
         def on_succeeded(result: object) -> None:
             # Ignore stale results if the user selected a different entry
-            if self._current_entry_id != entry_id:
+            # or a newer search was started.
+            if self._current_entry_id != entry_id or my_generation != self._ao_generation:
                 return
             payload = dict(result) if result else {}
             self._render_match_results(payload, automatic_file_id, size_str)
 
         def on_failed(msg: str) -> None:
-            if self._current_entry_id != entry_id:
+            if self._current_entry_id != entry_id or my_generation != self._ao_generation:
                 return
             self._candidates_detail.setText(
                 f'<span style="color:#c00;">Search failed: {html_mod.escape(msg)}</span>'
@@ -442,7 +465,7 @@ class MatchDetailPanel(QtWidgets.QWidget):
             method = html_mod.escape(str(ac.method))
             rows_html.append(
                 f"<tr><td>  </td>"
-                f'<td><a href="{href_val}" style="color:#4a9eff;text-decoration:none;">{title}</a></td>'
+                f'<td><a href="{href_val}" style="color:{self._tokens.info_fg};text-decoration:none;">{title}</a></td>'
                 f"<td>{conf_str}</td>"
                 f"<td>{method}</td><td>{seeders}</td>"
                 f"<td>{source_badge_html}</td></tr>"
@@ -451,10 +474,10 @@ class MatchDetailPanel(QtWidgets.QWidget):
         status_footer = ""
         if ao_status != "ok" and not ao_candidates:
             status_label = "Archive.org unavailable" if ao_status == "error" else "Archive.org timed out"
-            status_footer = f"<tr><td></td><td colspan='5' style='color:#888;'>{status_label}</td></tr>"
+            status_footer = f"<tr><td></td><td colspan='5' style='color:{self._tokens.text_muted};'>{status_label}</td></tr>"
         elif ao_candidates:
             status_footer = (
-                "<tr><td></td><td colspan='5' style='color:#888;font-size:10px;'>"
+                f"<tr><td></td><td colspan='5' style='color:{self._tokens.text_muted};font-size:10px;'>"
                 "Click an archive.org link to select it as the download source"
                 "</td></tr>"
             )

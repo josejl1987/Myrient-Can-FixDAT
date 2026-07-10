@@ -2,10 +2,12 @@
 
 Order (concatenated in this sequence):
 
-    base → panels → inspectors → actions → states → {library | downloads | collections}
+    base → panels → inspectors → actions → states → library → downloads → collections
 
-Page-specific QSS must override a class name introduced in the shared
-layers, not invent new selectors.
+All page-specific QSS files are loaded globally so that shared selectors
+defined in them (e.g. ``accentButton`` in library.qss) are available to
+every page.  Pages that need overrides should target their own objectName
+selectors, not invent new shared ones.
 """
 
 from __future__ import annotations
@@ -14,34 +16,31 @@ from pathlib import Path
 
 _HERE = Path(__file__).resolve().parent
 
-_SHARED_ORDER = [
+_ORDER = [
     "base.qss",
     "panels.qss",
     "inspectors.qss",
     "actions.qss",
     "states.qss",
+    "library.qss",
+    "downloads.qss",
+    "collections.qss",
+    "reports.qss",
+    "settings.qss",
 ]
-
-_PAGE_FILES: dict[str, str] = {
-    "library": "library.qss",
-    "downloads": "downloads.qss",
-    "collections": "collections.qss",
-}
 
 
 def load_qss(page_name: str | None = None) -> str:
-    """Load and concatenate QSS files in the canonical cascade order.
+    """Load and concatenate all QSS files in the canonical cascade order.
 
     Args:
-        page_name: Optional page key (``"library"``, ``"downloads"``,
-            ``"collections"``) to append page-specific overrides.
+        page_name: Deprecated — kept for backward compatibility.  All
+            page-specific QSS files are now loaded globally so that
+            shared selectors (``accentButton``, ``libraryTable``, etc.)
+            are available on every page.
     """
-    files: list[str] = list(_SHARED_ORDER)
-    if page_name and page_name in _PAGE_FILES:
-        files.append(_PAGE_FILES[page_name])
-
     parts: list[str] = []
-    for name in files:
+    for name in _ORDER:
         path = _HERE / name
         if path.exists():
             parts.append(path.read_text(encoding="utf-8"))
@@ -50,6 +49,4 @@ def load_qss(page_name: str | None = None) -> str:
 
 def all_qss_files() -> list[str]:
     """Return the full ordered list of QSS filenames (for diagnostics)."""
-    result: list[str] = list(_SHARED_ORDER)
-    result.extend(_PAGE_FILES.values())
-    return result
+    return list(_ORDER)

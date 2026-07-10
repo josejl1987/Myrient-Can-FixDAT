@@ -10,7 +10,7 @@ import enum
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
-from minerva_db import DatEntry
+from minerva.parsers.dat_parser import DatEntry
 
 
 class DownloadSource(str, enum.Enum):
@@ -18,6 +18,7 @@ class DownloadSource(str, enum.Enum):
     MINERVA_TORRENT = "minerva_torrent"
     ARCHIVE_ORG_TORRENT = "archive_org_torrent"
     ARCHIVE_ORG_HTTP = "archive_org_http"
+    ROMRESOLVE = "romresolve"
 
 
 @dataclass(frozen=True, slots=True)

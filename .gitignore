@@ -50,7 +50,6 @@ torrents/minerva_index.db
 torrents/minerva_index.json
 poc_downloads/
 test_dl_output/
-.qbitseed/   # persistent qBittorrent working state (partial .parts, seed data)
 .tmp_dl/     # legacy aria2c temp
 .tmp_qbit/   # legacy qbit temp
 # Data / runtime
@@ -60,4 +59,36 @@ torrents/
 *.torrent
 *.patch
 *.uiux.patch
-poc_minerva.py
+
+# Test / coverage artifacts
+.coverage
+.pytest_cache/
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+
+# Agent / tool caches
+.agent/
+.reasonix/
+.opencode/
+.research-cache/
+
+# Binary runtime artifacts
+.bin/
+
+# Generated dumps
+repomix-output.xml
+*.diff
+
+# Root-level DAT corpora (keep fixtures under tests/fixtures/)
+/*.dat
+
+# Backup zips
+.git.zip
+*.zip
+!tests/fixtures/*.json
+
+# Unrelated media
+*.wav
+Truthear_*

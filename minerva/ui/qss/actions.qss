@@ -27,3 +27,43 @@ QPushButton#actionGroupDestructive {
 QPushButton#actionGroupDestructive:hover {
     background: {{token.error_surface}};
 }
+
+/* Accent button — shared primary CTA used by EmptyState, ContentState, and pages. */
+QPushButton#accentButton {
+    background: {{token.accent}};
+    color: white;
+    border: 1px solid {{token.accent}};
+    border-radius: {{token.radius_md}};
+    padding: 5px 14px;
+    font-weight: 600;
+}
+QPushButton#accentButton:hover { background: {{token.accent_hover}}; }
+QPushButton#accentButton:disabled {
+    color: {{token.disabled_text}};
+    background: {{token.surface}};
+    border-color: {{token.border}};
+}
+
+/* Dialog buttons — confirm/cancel pair used in QueuePreviewDialog. */
+QPushButton#confirmButton {
+    background: {{token.accent}};
+    color: white;
+    border: 1px solid {{token.accent}};
+    border-radius: {{token.radius_md}};
+    padding: 5px 14px;
+    font-weight: 600;
+}
+QPushButton#confirmButton:hover { background: {{token.accent_hover}}; }
+QPushButton#confirmButton:disabled {
+    color: {{token.disabled_text}};
+    background: {{token.surface}};
+    border-color: {{token.border}};
+}
+QPushButton#cancelButton {
+    background: {{token.surface_raised}};
+    color: {{token.text}};
+    border: 1px solid {{token.border}};
+    border-radius: {{token.radius_md}};
+    padding: 5px 14px;
+}
+QPushButton#cancelButton:hover { border-color: {{token.accent}}; }

@@ -1,12 +1,12 @@
-"""SetupWizard — first-run QWizard for qBit connection, index build, and output dir.
+"""SetupWizard — first-run QWizard for libtorrent, index build, and output dir.
 
 3 steps:
-  1. qBittorrent connection (URL, user, password, test button)
+  1. Native libtorrent engine check
   2. Torrent index build (progress bar, cancel → rollback)
   3. Output directory picker
 
-``is_first_run(QSettings)`` checks whether qBit settings AND index path
-exist. If neither is configured, the wizard should be shown.
+``is_first_run(QSettings)`` checks whether a usable index path exists.
+The torrent engine is in-process and requires no external client settings.
 """
 
 from __future__ import annotations
@@ -23,55 +23,42 @@ log = logging.getLogger(__name__)
 
 
 def is_first_run(settings: QtCore.QSettings) -> bool:
-    """Return True if the app has never been configured before.
-
-    Checks whether qBit URL is set AND whether an index path exists.
-    If neither is configured, this is a first run.
-    """
-    qbit_url = settings.value("qbit_url", "", str)
+    """Return True until the app has a usable torrent index."""
     index_path = settings.value("index_path", "", str)
-
-    has_qbit = bool(qbit_url)
     has_index = bool(index_path) and Path(index_path).exists()
+    return not has_index
 
-    return not has_qbit and not has_index
 
-
-class _ConnectionPage(QtWidgets.QWizardPage):
-    """Step 1: qBittorrent connection settings."""
+class _EnginePage(QtWidgets.QWizardPage):
+    """Step 1: native libtorrent engine availability."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setTitle("Connect to qBittorrent")
-        self.setSubTitle("Enter your qBittorrent Web UI connection details.")
+        self.setTitle("Native libtorrent engine")
+        self.setSubTitle("Minerva uses libtorrent in-process; no external torrent client is required.")
 
         layout = QtWidgets.QVBoxLayout(self)
-
-        form = QtWidgets.QFormLayout()
-        self._url_input = QtWidgets.QLineEdit("http://localhost:8080")
-        self._user_input = QtWidgets.QLineEdit("admin")
-        self._pass_input = QtWidgets.QLineEdit()
-        self._pass_input.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-
-        form.addRow("URL:", self._url_input)
-        form.addRow("Username:", self._user_input)
-        form.addRow("Password:", self._pass_input)
-        layout.addLayout(form)
-
-        self._test_btn = QtWidgets.QPushButton("Test connection")
+        self._summary = QtWidgets.QLabel(
+            "Downloads are handled by the bundled native torrent engine. "
+            "Install the libtorrent Python bindings with the project dependencies "
+            "before starting downloads."
+        )
+        self._summary.setWordWrap(True)
+        self._test_btn = QtWidgets.QPushButton("Check libtorrent")
         self._test_status = QtWidgets.QLabel("")
+        self._test_btn.clicked.connect(self._check_libtorrent)
+
+        layout.addWidget(self._summary)
         layout.addWidget(self._test_btn)
         layout.addWidget(self._test_status)
         layout.addStretch(1)
 
-    def url(self) -> str:
-        return self._url_input.text()
-
-    def user(self) -> str:
-        return self._user_input.text()
-
-    def password(self) -> str:
-        return self._pass_input.text()
+    def _check_libtorrent(self) -> None:
+        try:
+            from minerva.native_torrent import NativeTorrentSession
+            self._test_status.setText(NativeTorrentSession().test_connection())
+        except Exception as exc:
+            self._test_status.setText(f"libtorrent unavailable: {exc}")
 
 
 class _IndexBuildPage(QtWidgets.QWizardPage):
@@ -189,7 +176,7 @@ class _OutputDirPage(QtWidgets.QWizardPage):
 
 
 class SetupWizard(QtWidgets.QWizard):
-    """First-run setup wizard — 3 steps: qBit, index, output dir."""
+    """First-run setup wizard — 3 steps: engine, index, output dir."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
@@ -197,10 +184,10 @@ class SetupWizard(QtWidgets.QWizard):
         self.setWizardStyle(QtWidgets.QWizard.WizardStyle.ModernStyle)
         self.setMinimumSize(640, 480)
 
-        self._connection_page = _ConnectionPage()
+        self._engine_page = _EnginePage()
         self._index_page = _IndexBuildPage()
         self._output_page = _OutputDirPage()
 
-        self.addPage(self._connection_page)
+        self.addPage(self._engine_page)
         self.addPage(self._index_page)
         self.addPage(self._output_page)

@@ -2,17 +2,10 @@
 
 from __future__ import annotations
 
-import sys
 import tempfile
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
-
-_HERE = Path(__file__).parent
-_PROJECT_ROOT = _HERE.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from minerva.domain.reports import ReportSummary, ReviewEntry
 from minerva.services.report_acquisition import ReportAcquisitionService

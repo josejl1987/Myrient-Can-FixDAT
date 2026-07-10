@@ -111,7 +111,7 @@ class MetricCard(QtWidgets.QFrame):
         colour, soft = self._colour()
         self._icon_container.setStyleSheet(
             "QFrame#metricIconContainer {"
-            f" background: {soft}; border: 1px solid {colour}; border-radius: 8px;"
+            f" background: {soft}; border: 1px solid {colour}; border-radius: {self._tokens.radius_md};"
             "}"
         )
         if self._icon is not None:

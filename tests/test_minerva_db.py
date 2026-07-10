@@ -5,12 +5,8 @@ Run with: python -m pytest tests/test_minerva_db.py -v
 Or:       python tests/test_minerva_db.py
 """
 import logging
-import sys
 import unittest
 from pathlib import Path
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minerva_db import (
     COLLECTION_NO_INTRO,

@@ -38,6 +38,7 @@ class SettingsPage(BasePage):
         settings_app: str = "MinervaGUI",
     ) -> None:
         super().__init__(app_state)
+        self.setObjectName("pageSurface")
         self._settings = QtCore.QSettings(settings_org, settings_app)
         self._pool = QtCore.QThreadPool.globalInstance()
         self._draft = SettingsDraft()
@@ -78,10 +79,11 @@ class SettingsPage(BasePage):
         body.setSpacing(14)
         body.addWidget(self._category_list)
         body.addWidget(self._pages, 1)
-
         self._restore_btn = QtWidgets.QPushButton(Icons.refresh(), "Restore defaults")
+        self._restore_btn.setObjectName("subtleButton")
         self._restore_btn.clicked.connect(self._restore_defaults)
         self._cancel_btn = QtWidgets.QPushButton("Cancel")
+        self._cancel_btn.setObjectName("subtleButton")
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._save_btn = QtWidgets.QPushButton(Icons.save(), "Save changes")
         self._save_btn.setObjectName("primaryButton")
@@ -101,9 +103,8 @@ class SettingsPage(BasePage):
 
         self._state = ContentState()
         self._state.set_content(content_widget)
-
         root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(24, 18, 24, 18)
+        root.setContentsMargins(24, 20, 24, 20)
         root.setSpacing(14)
         root.addWidget(self._header)
         root.addWidget(self._state, 1)

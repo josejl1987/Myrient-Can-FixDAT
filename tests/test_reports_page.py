@@ -128,9 +128,9 @@ def test_page_has_cta_empty_states(qtbot):
     qtbot.addWidget(page)
 
     assert hasattr(page, "_no_index_state")
-    assert hasattr(page, "_no_qbit_state")
+    assert hasattr(page, "_no_torrent_engine_state")
     assert page._no_index_state is not None
-    assert page._no_qbit_state is not None
+    assert page._no_torrent_engine_state is not None
 
 
 def test_report_context_menu_has_queue_action(qtbot):

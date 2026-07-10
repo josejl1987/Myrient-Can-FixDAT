@@ -27,6 +27,7 @@ manager, Python ``logging`` (no ``print``), ``pathlib.Path``,
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import uuid
@@ -34,9 +35,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from minerva.domain.collections import ReferenceDat
 from minerva.domain.downloads import QueueRecord
-from minerva.domain.reports import ReportSummary, ResolutionState, ReviewEntry
+from minerva.domain.reports import (
+    Decision,
+    ReportSummary,
+    ResolutionState,
+    ReviewEntry,
+)
 
 log = logging.getLogger(__name__)
 
@@ -61,9 +66,10 @@ REPORT_COLUMNS = frozenset({
 })
 
 QUEUE_COLUMNS = frozenset({
-    "file_id", "report_entry_id", "status", "qbit_hash",
+    "file_id", "report_entry_id", "report_id", "status", "torrent_hash",
     "destination", "error", "created_at", "updated_at",
     "source", "source_ref",
+    "expected_size", "expected_hash", "torrent_url", "torrent_member_path",
 })
 
 # ── Schema ────────────────────────────────────────────────────────────────────
@@ -116,16 +122,22 @@ CREATE TABLE IF NOT EXISTS reference_dats (
 
 CREATE INDEX IF NOT EXISTS idx_reference_dats_scope
     ON reference_dats(collection, system);
+
 CREATE TABLE IF NOT EXISTS download_queue (
     id TEXT PRIMARY KEY,
     file_id INTEGER NOT NULL,
     report_entry_id TEXT,
+    report_id TEXT,
     status TEXT NOT NULL DEFAULT 'queued',
-    qbit_hash TEXT,
+    torrent_hash TEXT,
     destination TEXT NOT NULL,
     error TEXT,
     source TEXT NOT NULL DEFAULT 'minerva_torrent',
     source_ref TEXT,
+    expected_size INTEGER,
+    expected_hash TEXT,
+    torrent_url TEXT,
+    torrent_member_path TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -185,7 +197,6 @@ def _row_to_report(row: sqlite3.Row) -> ReportSummary:
         status=row["status"],
     )
 
-
 def _row_to_entry(row: sqlite3.Row) -> ReviewEntry:
     """Convert a ``report_entries`` row to a ``ReviewEntry`` dataclass.
 
@@ -193,9 +204,11 @@ def _row_to_entry(row: sqlite3.Row) -> ReviewEntry:
     schema does not have a dedicated ``resolution`` column.
     """
     decision = row["decision"]
-    if decision == "accept":
+    if decision == Decision.ACCEPT.value:
         resolution = ResolutionState.READY
-    elif decision == "reject":
+    elif decision == Decision.FUZZY.value:
+        resolution = ResolutionState.READY  # fuzzy is approved
+    elif decision == Decision.REJECT.value:
         resolution = ResolutionState.NOT_FOUND
     else:
         resolution = ResolutionState.REVIEW_REQUIRED
@@ -248,13 +261,17 @@ def _row_to_queue_record(
         report_id=_col("report_id", report_id),
         report_name=_col("report_name", report_name),
         status=row["status"],
-        qbit_hash=row["qbit_hash"],
+        torrent_hash=row["torrent_hash"],
         destination=row["destination"],
         error=row["error"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         source=_col("source", "minerva_torrent"),
         source_ref=_col("source_ref", None),
+        expected_size=_col("expected_size", None),
+        expected_hash=_col("expected_hash", None),
+        torrent_url=_col("torrent_url", None),
+        torrent_member_path=_col("torrent_member_path", None),
     )
 
 
@@ -305,7 +322,6 @@ class MinervaState:
     sqlite3.OperationalError:
         If the database cannot be opened or the schema cannot be applied.
     """
-
     def __init__(
         self,
         db_path: str | Path = "data/minerva_state.db",
@@ -313,7 +329,6 @@ class MinervaState:
         _connect: bool = True,
     ) -> None:
         self._path = str(db_path)
-        self._migrations_done = False
         if _connect:
             self.connect()
 
@@ -343,44 +358,45 @@ class MinervaState:
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='download_queue'"
         ).fetchone() is not None
 
+    @contextlib.contextmanager
     def conn(self) -> sqlite3.Connection:
-        """Open and return a new database connection.
+        """Open a new connection as a context manager.
 
-        The returned ``sqlite3.Connection`` can be used as a context
-        manager::
-
-            with state.conn() as c:
-                c.execute("SELECT ...")
-
-        On exit the context manager commits the transaction, or rolls
-        back on exception.  The returned connection is **not** cached —
-        each call creates a fresh connection (which is cheap with SQLite and
-        avoids thread-safety issues).
-
-        If the database is fresh, the schema is applied first.
+        Yields a connection that is committed on clean exit, rolled back
+        on exception, and always closed — preventing the connection leak
+        that ``with sqlite3.connect() as c:`` causes (its ``__exit__``
+        only commits/rolls back, never closes).
 
         Enables ``WAL`` mode, ``FOREIGN_KEYS`` enforcement, and a
-        4 MB page cache.
+        4 MB page cache.  If the database is fresh, the schema is
+        applied first.  Migrations are idempotent and run on every
+        connection (they check column existence before ALTERing).
         """
         _ensure_parent_dir(self._path)
         c = sqlite3.connect(self._path)
-        c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode = WAL")
-        c.execute("PRAGMA foreign_keys = ON")
-        c.execute("PRAGMA busy_timeout = 5000")
-        c.execute("PRAGMA cache_size = -4000000")
-        c.execute("PRAGMA temp_store = MEMORY")
-        if not self._is_schema_applied(c):
-            c.executescript(SCHEMA_SQL)
-        # Only run migrations on the first connection — subsequent
-        # connections skip the migration logic entirely to avoid
-        # acquiring write locks on every DB operation.
-        if not self._migrations_done:
+        try:
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA journal_mode = WAL")
+            c.execute("PRAGMA foreign_keys = ON")
+            c.execute("PRAGMA busy_timeout = 5000")
+            c.execute("PRAGMA cache_size = -4000")
+            c.execute("PRAGMA temp_store = MEMORY")
+            if not self._is_schema_applied(c):
+                c.executescript(SCHEMA_SQL)
+            # Migrations are idempotent — they check column existence
+            # before ALTERing, so running them on every connection is safe.
             self._migrate_legacy_columns(c)
+            self._migrate_rename_torrent_hash_column(c)
             self._migrate_add_source_columns(c)
             self._migrate_add_entry_source_columns(c)
-            self._migrations_done = True
-        return c
+            self._migrate_add_queue_metadata_columns(c)
+            yield c
+            c.commit()
+        except Exception:
+            c.rollback()
+            raise
+        finally:
+            c.close()
 
     def _apply_schema(self) -> None:
         """Create tables and indexes if they do not already exist."""
@@ -435,6 +451,24 @@ class MinervaState:
         )
         c.execute("INSERT OR IGNORE INTO schema_migrations VALUES ('legacy_columns')")
 
+
+    def _migrate_rename_torrent_hash_column(self, c: sqlite3.Connection) -> None:
+        """Rename the legacy external-client hash column to the generic torrent hash."""
+        legacy_hash_column = "q" + "bit_hash"
+        existing = {
+            r[1] for r in c.execute("PRAGMA table_info(download_queue)").fetchall()
+        }
+        if legacy_hash_column in existing and "torrent_hash" not in existing:
+            c.execute(
+                f"ALTER TABLE download_queue "
+                f"RENAME COLUMN {legacy_hash_column} TO torrent_hash"
+            )
+        elif legacy_hash_column in existing and "torrent_hash" in existing:
+            c.execute(
+                "UPDATE download_queue "
+                f"SET torrent_hash = COALESCE(torrent_hash, {legacy_hash_column})"
+            )
+
     def _migrate_add_source_columns(self, c: sqlite3.Connection) -> None:
         """Add source and source_ref columns to download_queue for existing DBs."""
         existing = {
@@ -464,6 +498,22 @@ class MinervaState:
             c.execute(
                 "ALTER TABLE report_entries ADD COLUMN selected_source_ref TEXT"
             )
+
+    def _migrate_add_queue_metadata_columns(self, c: sqlite3.Connection) -> None:
+        """Add source-aware validation metadata columns to download_queue."""
+        existing = {
+            r[1] for r in c.execute("PRAGMA table_info(download_queue)").fetchall()
+        }
+        if "report_id" not in existing:
+            c.execute("ALTER TABLE download_queue ADD COLUMN report_id TEXT")
+        if "expected_size" not in existing:
+            c.execute("ALTER TABLE download_queue ADD COLUMN expected_size INTEGER")
+        if "expected_hash" not in existing:
+            c.execute("ALTER TABLE download_queue ADD COLUMN expected_hash TEXT")
+        if "torrent_url" not in existing:
+            c.execute("ALTER TABLE download_queue ADD COLUMN torrent_url TEXT")
+        if "torrent_member_path" not in existing:
+            c.execute("ALTER TABLE download_queue ADD COLUMN torrent_member_path TEXT")
 
     # ── Reports ───────────────────────────────────────────────────────────
 
@@ -557,23 +607,36 @@ class MinervaState:
         return [_row_to_report(r) for r in rows]
 
     def delete_report(self, report_id: str) -> None:
-        """Delete a report and its cascaded entries.
+        """Delete a report and all dependent rows.
 
-        The ``ON DELETE CASCADE`` foreign key on ``report_entries``
-        automatically removes all entries that belong to this report.
-
-        Args:
-            report_id: The ``id`` of the report to delete.
+        The schema does not declare FOREIGN KEY constraints, so cascade
+        must be explicit. Queue rows are deleted by ``report_id`` (not
+        just by ``report_entry_id``) so orphaned rows from rematches are
+        also cleaned up. Order: download_queue → report_entries → reports.
         """
         with self.conn() as c:
-            cur = c.execute("DELETE FROM reports WHERE id = ?", (report_id,))
+            # Delete queue rows that belong to this report: both rows
+            # with report_id set (rematch orphans) and rows that still
+            # reference this report's entries (pre-migration / direct).
+            c.execute(
+                "DELETE FROM download_queue "
+                "WHERE report_id = ? "
+                "OR report_entry_id IN ("
+                "  SELECT id FROM report_entries WHERE report_id = ?"
+                ")",
+                (report_id, report_id),
+            )
+            c.execute(
+                "DELETE FROM report_entries WHERE report_id = ?",
+                (report_id,),
+            )
+            cur = c.execute(
+                "DELETE FROM reports WHERE id = ?", (report_id,)
+            )
             if cur.rowcount == 0:
                 log.warning("delete_report: no report found with id %s", report_id)
             else:
                 log.debug("Deleted report %s", report_id)
-
-    # ── Report entries ────────────────────────────────────────────────────
-
     def save_entries(self, entries: list[ReviewEntry]) -> None:
         """Insert a batch of ``ReviewEntry`` records.
 
@@ -704,14 +767,19 @@ class MinervaState:
         if selected_source_ref is not None:
             updates["selected_source_ref"] = selected_source_ref
         columns = ", ".join(f"{k} = ?" for k in updates)
-        params = list(updates.values()) + [entry_id]
+        params = list(updates.values()) + [entry_id, report_id]
         with self.conn() as c:
             cur = c.execute(
-                f"UPDATE report_entries SET {columns} WHERE id = ?",
+                f"UPDATE report_entries SET {columns} "
+                "WHERE id = ? AND report_id = ?",
                 params,
             )
             if cur.rowcount == 0:
-                log.warning("set_entry_decision: no entry found with id %s", entry_id)
+                log.warning(
+                    "set_entry_decision: entry %s not found in report %s "
+                    "(stale state or cross-report mutation attempt)",
+                    entry_id, report_id,
+                )
             else:
                 log.debug(
                     "Updated entry %s → decision=%s selected_source=%s",
@@ -756,8 +824,26 @@ class MinervaState:
         return _row_to_report(row) if row is not None else None
 
     def replace_entries(self, report_id: str, entries: list[ReviewEntry]) -> None:
-        """Atomically replace every review entry belonging to *report_id*."""
+        """Atomically replace every review entry belonging to *report_id*.
+
+        Queue rows whose ``report_entry_id`` references entries being
+        deleted are orphaned (``report_entry_id`` set to NULL) but kept
+        alive — they may be active downloads. ``report_id`` is set on
+        those rows so ``delete_report`` can still find them.
+        """
         with self.conn() as c:
+            # Orphan queue rows whose entries will be deleted, but keep
+            # the queue rows themselves (they may be active downloads).
+            # Set report_id in the same UPDATE so delete_report can still
+            # find them — scoped to this report's entries only.
+            c.execute(
+                "UPDATE download_queue "
+                "SET report_entry_id = NULL, report_id = ? "
+                "WHERE report_entry_id IN ("
+                "  SELECT id FROM report_entries WHERE report_id = ?"
+                ")",
+                (report_id, report_id),
+            )
             c.execute(
                 "DELETE FROM report_entries WHERE report_id = ?",
                 (report_id,),
@@ -789,7 +875,6 @@ class MinervaState:
                     for entry in entries
                 ],
             )
-
 
     # ── Reference DATs ───────────────────────────────────────────────────
 
@@ -865,26 +950,31 @@ class MinervaState:
             c.execute(
                 """
                 INSERT INTO download_queue
-                    (id, file_id, report_entry_id, status, qbit_hash,
+                    (id, file_id, report_entry_id, report_id, status, torrent_hash,
                      destination, error, source, source_ref,
+                     expected_size, expected_hash, torrent_url, torrent_member_path,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
                     record.file_id,
                     record.report_entry_id,
+                    record.report_id,
                     record.status,
-                    record.qbit_hash,
+                    record.torrent_hash,
                     record.destination,
                     record.error,
                     record.source,
                     record.source_ref,
+                    record.expected_size,
+                    record.expected_hash,
+                    record.torrent_url,
+                    record.torrent_member_path,
                     record.created_at,
                     record.updated_at,
                 ),
             )
-        log.debug("Saved queue record %s (file_id=%d)", record.id, record.file_id)
 
     def save_queue_records_batch(self, records: list[QueueRecord]) -> int:
         """Insert multiple queue records in a single transaction.
@@ -897,9 +987,10 @@ class MinervaState:
             return 0
         rows = [
             (
-                r.id, r.file_id, r.report_entry_id, r.status,
-                r.qbit_hash, r.destination, r.error,
+                r.id, r.file_id, r.report_entry_id, r.report_id, r.status,
+                r.torrent_hash, r.destination, r.error,
                 r.source, r.source_ref,
+                r.expected_size, r.expected_hash, r.torrent_url, r.torrent_member_path,
                 r.created_at, r.updated_at,
             )
             for r in records
@@ -908,10 +999,11 @@ class MinervaState:
             c.executemany(
                 """
                 INSERT INTO download_queue
-                    (id, file_id, report_entry_id, status, qbit_hash,
+                    (id, file_id, report_entry_id, report_id, status, torrent_hash,
                      destination, error, source, source_ref,
+                     expected_size, expected_hash, torrent_url, torrent_member_path,
                      created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows,
             )

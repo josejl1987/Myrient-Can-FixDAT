@@ -7,7 +7,7 @@ VENV_PYTHON="$SCRIPT_DIR/.venv/bin/python"
 
 if [ ! -f "$VENV_PYTHON" ]; then
     echo "Error: Virtual environment not found at $SCRIPT_DIR/.venv/"
-    echo "Create it with:  python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt"
+    echo "Create it with:  python -m venv .venv && source .venv/bin/activate && pip install \".[dev]\""
     exit 1
 fi
 

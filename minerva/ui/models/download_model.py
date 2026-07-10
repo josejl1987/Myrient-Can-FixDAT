@@ -22,16 +22,20 @@ class DownloadRecord:
     eta_seconds: float = 0.0
     destination: str = ""
     torrent_name: str = ""
-    qbit_hash: str | None = None
+    torrent_hash: str | None = None
     save_path: str = ""
     collection: str = ""
     system: str = ""
+    report_id: str = ""
+    report_name: str = ""
     error_message: str | None = None
     started_at: float | None = None
     completed_at: float | None = None
     peers: int = 0
     seeds: int = 0
     ratio: float = 0.0
+    seed_ratio: float = 0.0
+    seed_time_remaining: float = 0.0
     haystack: str = ""
 
 

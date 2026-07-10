@@ -1,4 +1,10 @@
-"""Reference-quality reports dashboard with navigator, workspace and inspector."""
+"""Reference-quality reports dashboard with navigator, workspace and inspector.
+
+INVARIANT: ReportsPage does not construct MinervaState, MinervaDB, or
+QSettings directly. All state access goes through self._app_state.reports
+(ReportStore). The only exception is _match_report_task, which receives a
+MinervaState via ReportStore.state_for_worker() for off-thread matching.
+"""
 
 from __future__ import annotations
 
@@ -20,11 +26,9 @@ from minerva.domain.reports import (
     QueueResult,
     ReportSummary,
     ReviewEntry,
+    is_approved,
 )
-from minerva.services.report_acquisition import (
-    ReportAcquisitionService,
-    romm_destination,
-)
+from minerva.services.report_acquisition import ReportAcquisitionService
 from minerva.ui.icons import Icons
 from minerva.ui.models.delegates import DisplayDelegate, SizeDelegate
 from minerva.ui.models.record_model import ColumnSpec, RecordListModel
@@ -41,7 +45,9 @@ from minerva.ui.widgets.responsive_workspace import ResponsiveWorkspace
 from minerva.ui.widgets.segmented_control import SegmentedControl
 from minerva.ui.widgets.status_badge import BadgeKind
 from minerva.ui.widgets.surface_panel import SurfacePanel
-from minerva_db import MinervaDB, parse_dat_file, parse_rv_fix_csv
+from minerva.parsers.csv_parser import parse_rv_fix_csv
+from minerva.parsers.dat_parser import parse_dat_file
+from minerva_db import MinervaDB
 from minerva_state import MinervaState
 
 log = logging.getLogger(__name__)
@@ -109,7 +115,7 @@ class _EntryFilter(QtCore.QSortFilterProxyModel):
                 if raw_decision != "pending":
                     return False
             elif self.category == "approved":
-                if raw_decision not in {"accept", "fuzzy"}:
+                if not is_approved(row.entry):
                     return False
             elif self.category == "ignored":
                 if raw_decision != "reject":
@@ -207,17 +213,18 @@ class _PillDelegate(QtWidgets.QStyledItemDelegate):
         if value == "fuzzy":
             return "Approved", self._tokens.accent, self._tokens.info_bg
         return "Pending", self._tokens.text_muted, self._tokens.surface_raised
-
-
-def _match_report_task(report_id: str) -> dict:
+def _match_report_task(report_id: str, state: MinervaState | None = None) -> dict:
     """Run matching for a report in a worker thread.
 
     Routes through :class:`ReportAcquisitionService.match_report` — the
     single source of truth for classification and entry persistence.
+
+    ``state`` is injected by the caller (via ``ReportStore.state_for_worker()``)
+    to avoid constructing MinervaState in the worker thread.
     """
     from minerva.services.report_acquisition import ReportAcquisitionService as _Svc
 
-    svc = _Svc(state=MinervaState())
+    svc = _Svc(state=state or MinervaState())
     counts = svc.match_report(report_id)
     return {
         "report_id": report_id,
@@ -238,6 +245,8 @@ class ReportsPage(BasePage):
         self._selected_report_id: str | None = None
         self._selected_report_ids: set[str] = set()  # multi-selection → batch toolbar
         self._updating = False  # ponytail: guard for signal recursion
+        self._wired = False  # idempotent wiring guard for activate()
+        self._shortcuts: list = []  # owned QShortcut objects
 
         self._entry_model = RecordListModel([], _ENTRY_COLUMNS, self)
         self._entry_proxy = _EntryFilter(self)
@@ -389,13 +398,13 @@ class ReportsPage(BasePage):
             action_text="Build Index",
         )
         self._no_index_state.action_clicked.connect(self._rebuild_index)
-        self._no_qbit_state = EmptyState(
+        self._no_torrent_engine_state = EmptyState(
             icon=Icons.status_warning(),
             title="Can't reach download engine",
-            description="Check your connection settings.",
+            description="Install libtorrent and check the download settings.",
             action_text="Open Settings",
         )
-        self._no_qbit_state.action_clicked.connect(self._open_settings)
+        self._no_torrent_engine_state.action_clicked.connect(self._open_settings)
         self._loading_state = EmptyState(
             icon=Icons.refresh(),
             title="Importing and matching",
@@ -415,7 +424,7 @@ class ReportsPage(BasePage):
 
         root = QtWidgets.QVBoxLayout(self)
         root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(16)
+        root.setSpacing(14)
         root.addWidget(self._header)
         root.addWidget(self._state, 1)
 
@@ -474,8 +483,10 @@ class ReportsPage(BasePage):
 
     def activate(self, view_state: object = None) -> None:
         self.refresh()
-        self._wire_signals()
-        self._wire_shortcuts()
+        if not self._wired:
+            self._wire_signals()
+            self._wire_shortcuts()
+            self._wired = True
 
     def _wire_signals(self) -> None:
         """Subscribe to ReportStore signals with _updating guard."""
@@ -498,6 +509,7 @@ class ReportsPage(BasePage):
         for key, callback in shortcuts:
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.activated.connect(callback)
+            self._shortcuts.append(shortcut)
 
     # ── Signal handlers with _updating guard ────────────────────────────
 
@@ -527,7 +539,7 @@ class ReportsPage(BasePage):
             return
         self._updating = True
         try:
-            MinervaState().set_entry_decision(report_id, entry_id, decision)
+            self._app_state.reports.set_entry_decision(report_id, entry_id, decision)
             self._refresh_entry_data()
             # Auto-advance: check if all entries reviewed
             self._check_review_complete(report_id)
@@ -540,7 +552,7 @@ class ReportsPage(BasePage):
             return
         self._updating = True
         try:
-            entries = MinervaState().get_entries(report_id)
+            entries = self._app_state.reports.get_entries(report_id)
             decision = "accept" if filter_type == "exact" else "fuzzy"
             updated = 0
             for entry in entries:
@@ -548,12 +560,12 @@ class ReportsPage(BasePage):
                     continue
                 method = (entry.automatic_method or "").lower()
                 if filter_type == "exact" and method == "exact":
-                    MinervaState().set_entry_decision(report_id, entry.entry_id, decision)
+                    self._app_state.reports.set_entry_decision(report_id, entry.id, decision)
                     updated += 1
                 elif filter_type == "fuzzy" and method in {"fts5", "trigram", "keyword", "fuzzy"}:
                     conf = entry.automatic_confidence or 0
                     if conf * 100 >= threshold:
-                        MinervaState().set_entry_decision(report_id, entry.entry_id, decision)
+                        self._app_state.reports.set_entry_decision(report_id, entry.id, decision)
                         updated += 1
             if updated > 0:
                 self._refresh_entry_data()
@@ -573,11 +585,9 @@ class ReportsPage(BasePage):
             return
         self._updating = True
         try:
-            MinervaState().set_entry_decision(
-                report_id, entry_id, "accept",
-                selected_source=source,
-                selected_source_ref=source_ref,
-            )
+            self._app_state.reports.set_entry_decision(report_id, entry_id, "accept",
+            selected_source=source,
+            selected_source_ref=source_ref,)
             self._refresh_entry_data()
             self._check_review_complete(report_id)
             NotificationBanner.show_success(
@@ -591,10 +601,10 @@ class ReportsPage(BasePage):
     def _check_review_complete(self, report_id: str) -> None:
         """Show actionable toast when all entries in a report have been reviewed."""
         try:
-            entries = MinervaState().get_entries(report_id)
+            entries = self._app_state.reports.get_entries(report_id)
             pending = sum(1 for e in entries if e.decision == "pending")
             if pending == 0 and len(entries) > 0:
-                approved = sum(1 for e in entries if e.decision in {"accept", "fuzzy"})
+                approved = sum(1 for e in entries if is_approved(e))
                 if approved > 0:
                     from minerva.ui.notifications import NotificationService
                     ns = NotificationService(self)
@@ -613,10 +623,8 @@ class ReportsPage(BasePage):
     ) -> None:
         """Auto-select a Minerva candidate as the entry's match."""
         try:
-            MinervaState().set_entry_decision(
-                report_id, entry_id, "pending",
-                selected_file_id=file_id,
-            )
+            self._app_state.reports.set_entry_decision(report_id, entry_id, "pending",
+            selected_file_id=file_id,)
         except Exception:
             log.warning("Failed to auto-select Minerva candidate", exc_info=True)
 
@@ -629,7 +637,7 @@ class ReportsPage(BasePage):
                 source = self._entry_proxy.mapToSource(idx)
                 row = self._entry_model._records[source.row()]  # noqa: SLF001
                 self._on_decision_changed(
-                    self._selected_report_id, row.entry.entry_id, "accept"
+                    self._selected_report_id, row.entry.id, "accept"
                 )
 
     def _shortcut_ignore(self) -> None:
@@ -639,7 +647,7 @@ class ReportsPage(BasePage):
                 source = self._entry_proxy.mapToSource(idx)
                 row = self._entry_model._records[source.row()]  # noqa: SLF001
                 self._on_decision_changed(
-                    self._selected_report_id, row.entry.entry_id, "reject"
+                    self._selected_report_id, row.entry.id, "reject"
                 )
 
     def _shortcut_toggle(self) -> None:
@@ -650,9 +658,9 @@ class ReportsPage(BasePage):
                 source = self._entry_proxy.mapToSource(idx)
                 row = self._entry_model._records[source.row()]  # noqa: SLF001
                 current = (row.entry.decision or "pending").lower()
-                new_decision = "reject" if current in {"accept", "fuzzy"} else "accept"
+                new_decision = "reject" if is_approved(row.entry) else "accept"
                 self._on_decision_changed(
-                    self._selected_report_id, row.entry.entry_id, new_decision
+                    self._selected_report_id, row.entry.id, new_decision
                 )
 
     def _shortcut_queue(self) -> None:
@@ -687,14 +695,15 @@ class ReportsPage(BasePage):
         if self._selected_report_id is None:
             return
         try:
-            entries = MinervaState().get_entries(self._selected_report_id)
-            self._set_entry_data(entries)
+            report = self._app_state.reports.get_report(self._selected_report_id)
+            if report is not None:
+                self._show_report(report)
         except Exception:
             log.warning("Failed to refresh entry data", exc_info=True)
 
     def refresh(self) -> None:
         try:
-            reports = MinervaState().list_reports()
+            reports = self._app_state.reports.list_reports()
         except Exception as exc:
             self._error_state.set_description(str(exc))
             self._set_state(ReportsPageState.ERROR)
@@ -738,8 +747,8 @@ class ReportsPage(BasePage):
         if generation != self._generation:
             return
         from minerva.ui.result import OperationResult
-        if isinstance(payload, OperationResult) and not payload.success:
-            self._error_state.set_description(str(payload.error or payload.message or "Import failed"))
+        if isinstance(payload, OperationResult) and not payload.is_success:
+            self._error_state.set_description(str(payload.summary or payload.diagnostics or "Import failed"))
             self._set_state(ReportsPageState.ERROR)
             return
         data = payload.payload if isinstance(payload, OperationResult) else payload
@@ -765,8 +774,8 @@ class ReportsPage(BasePage):
             if not info.entries:
                 NotificationBanner.show_warning(self, "Empty report", str(path))
                 return
-            state = MinervaState()
-            existing = state.get_report_by_path(path)
+            store = self._app_state.reports
+            existing = store.get_report_by_path(path)
             if existing and report_id is None:
                 reply = QtWidgets.QMessageBox.question(
                     self, "Reimport report",
@@ -787,18 +796,18 @@ class ReportsPage(BasePage):
                 status="matching",
             )
             if existing:
-                state.update_report(
+                store.update_report(
                     report_id,
                     name=report.name, collection=report.collection, system=report.system,
                     requested_count=report.requested_count, status="matching",
                 )
             else:
-                state.save_report(report)
+                store.save_report(report)
             self._selected_report_id = report_id
             self._set_state(ReportsPageState.LOADING)
             self._generation += 1
             gen = self._generation
-            task = TaskRunner(_match_report_task, report_id)
+            task = TaskRunner(_match_report_task, report_id, store.state_for_worker())
             task.signals.result.connect(lambda payload, rid=report_id: self._on_rematch_result(gen, rid, payload))
             task.signals.error.connect(lambda details, rid=report_id: self._on_match_error(gen, rid, details))
             self._pool.start(task)
@@ -855,9 +864,10 @@ class ReportsPage(BasePage):
             self._card_unmatched.set_subtitle("Nothing outstanding")
             return
 
-        entries = MinervaState().get_entries(report.id)
+        entries = self._app_state.reports.get_entries(report.id)
         ids = [entry.automatic_file_id for entry in entries if entry.automatic_file_id]
-        item_map = {item.id: item for item in MinervaDB().get_files_by_ids(ids)} if ids else {}
+        index = self._app_state.index_db
+        item_map = {item.id: item for item in index.get_files_by_ids(ids)} if ids and index is not None else {}
         rows = [
             ReportEntryView(
                 entry=entry,
@@ -871,7 +881,7 @@ class ReportsPage(BasePage):
         counts = {
             "all": len(rows),
             "pending": sum(row.entry.decision == "pending" for row in rows),
-            "approved": sum(row.entry.decision in {"accept", "fuzzy"} for row in rows),
+            "approved": sum(1 for row in rows if is_approved(row.entry)),
             "ignored": sum(row.entry.decision == "reject" for row in rows),
         }
         self._segments.set_counts(counts)
@@ -903,7 +913,7 @@ class ReportsPage(BasePage):
         counts = {
             "all": len(entries),
             "pending": sum(1 for e in entries if e.decision == "pending"),
-            "approved": sum(1 for e in entries if e.decision in {"accept", "fuzzy"}),
+            "approved": sum(1 for e in entries if is_approved(e)),
             "ignored": sum(1 for e in entries if e.decision == "reject"),
         }
         self._segments.set_counts(counts)
@@ -949,13 +959,9 @@ class ReportsPage(BasePage):
     def _build_acquisition_service(self) -> ReportAcquisitionService:
         """Construct the service with the current controller + output dir."""
         controller = getattr(self.window(), "download_controller", None)
-        output_dir = QtCore.QSettings("MinervaFixDAT", "MinervaGUI").value(
-            "output_dir", "downloads", str,
-        )
-        return ReportAcquisitionService(
-            state=self._app_state.reports._state,
+        return self._app_state.reports.build_service(
             download_controller=controller,
-            output_dir=output_dir,
+            output_dir=self._app_state.output_dir,
         )
 
     def _on_report_selection_changed(self, reports: list[ReportSummary]) -> None:
@@ -980,10 +986,17 @@ class ReportsPage(BasePage):
                     self, "Queue failed", "The download controller is not initialised",
                 )
                 return
-            controller.reconcile()
+            controller.reconcile_async()
             svc = self._build_acquisition_service()
-            results = [svc.queue_ready(rid, include_reviewed=True) for rid in ids]
-            total = QueueResult.merge(*results)
+            approved_entries: list[ReviewEntry] = []
+            for rid in ids:
+                for entry in self._app_state.reports.get_entries(rid):
+                    if is_approved(entry) and (
+                        (entry.selected_file_id or entry.automatic_file_id) is not None
+                        or entry.selected_source_ref is not None
+                    ):
+                        approved_entries.append(entry)
+            total = svc.queue_entries(approved_entries, include_reviewed=True)
             log.info("batch queue (%d reports): added=%d, skipped_active=%d, "
                      "skipped_complete=%d, skipped_missing=%d",
                      len(ids), total.added, total.skipped_active,
@@ -996,12 +1009,11 @@ class ReportsPage(BasePage):
                 )
             else:
                 NotificationBanner.show_success(
-                    self, "Queue updated",
-                    f"Queued {total.added} ROMs from {len(ids)} reports "
-                    f"({total.skipped_active} active, {total.skipped_missing} missing).",
+                    self, "Queued",
+                    f"Added {total.added} files across {len(ids)} reports",
                 )
         except Exception as exc:
-            log.error("_queue_selected failed", exc_info=True)
+            log.exception("batch queue failed")
             NotificationBanner.show_error(self, "Queue failed", str(exc))
 
     def _rematch_selected_set(self) -> None:
@@ -1019,7 +1031,7 @@ class ReportsPage(BasePage):
 
     def _rematch_set_worker(self, ids: list[str]) -> dict:
         """Runs in worker thread. Best-effort per report."""
-        svc = ReportAcquisitionService(state=self._app_state.reports._state)
+        svc = self._app_state.reports.build_service()
         succeeded: list[str] = []
         failed: list[str] = []
         for rid in ids:
@@ -1128,13 +1140,10 @@ class ReportsPage(BasePage):
                     "The download controller is not initialised",
                 )
                 return
-            controller.reconcile()
-            output_dir = QtCore.QSettings("MinervaFixDAT", "MinervaGUI").value(
-                "output_dir", "downloads", str,
-            )
-            svc = ReportAcquisitionService(
-                state=MinervaState(), download_controller=controller,
-                output_dir=output_dir,
+            controller.reconcile_async()
+            svc = self._app_state.reports.build_service(
+                download_controller=controller,
+                output_dir=self._app_state.output_dir,
             )
             result = svc.queue_all_ready()
             log.info(
@@ -1168,11 +1177,11 @@ class ReportsPage(BasePage):
         report = self._selected_report()
         if report is None:
             return
-        entries = MinervaState().get_entries(report.id)
+        entries = self._app_state.reports.get_entries(report.id)
         approved = [
             entry
             for entry in entries
-            if entry.decision in {"accept", "fuzzy"}
+            if is_approved(entry)
             and (
                 (entry.selected_file_id or entry.automatic_file_id) is not None
                 or entry.selected_source_ref is not None
@@ -1191,51 +1200,21 @@ class ReportsPage(BasePage):
                 "The download controller is not initialised",
             )
             return
-        controller.reconcile()
-        output_root = Path(
-            QtCore.QSettings("MinervaFixDAT", "MinervaGUI").value("output_dir", "downloads", str)
+        controller.reconcile_async()
+        svc = self._app_state.reports.build_service(
+            download_controller=controller,
+            output_dir=self._app_state.output_dir,
         )
-
-        # Split entries by source
-        minerva_entries = [
-            e for e in approved
-            if e.selected_source == "minerva_torrent"
-            and (e.selected_file_id or e.automatic_file_id) is not None
-        ]
-        ao_entries = [
-            e for e in approved
-            if e.selected_source != "minerva_torrent"
-            and e.selected_source_ref is not None
-        ]
-
-        queue: list[tuple[int, str, str | None, str, str | None]] = []
-
-        # Minerva entries — look up file_id in index
-        if minerva_entries:
-            ids = [e.selected_file_id or e.automatic_file_id for e in minerva_entries]
-            items = {item.id: item for item in MinervaDB().get_files_by_ids(ids)}
-            for entry in minerva_entries:
-                file_id = entry.selected_file_id or entry.automatic_file_id
-                item = items.get(file_id)
-                if item is None:
-                    log.warning("_queue_approved: file_id %s not found in index, skipping", file_id)
-                    continue
-                destination = romm_destination(output_root, item.system, item.basename)
-                queue.append((item.id, str(destination), entry.id, "minerva_torrent", None))
-
-        # Archive.org entries — use source_ref directly
-        for entry in ao_entries:
-            dest_name = Path(entry.filename).name
-            system = report.system or ""
-            destination = romm_destination(output_root, system, dest_name)
-            queue.append((0, str(destination), entry.id, entry.selected_source, entry.selected_source_ref))
-
-        if queue:
-            controller.add_many_to_queue(queue)
+        result = svc.queue_entries(approved, include_reviewed=True)
+        if result.added:
             NotificationBanner.show_success(
                 self, "Added to queue",
-                f"Queued {len(queue):,} reviewed files "
-                f"({len(minerva_entries)} Minerva, {len(ao_entries)} archive.org)",
+                f"Queued {result.added:,} reviewed files",
+            )
+        elif result.skipped_active or result.skipped_complete:
+            NotificationBanner.show_info(
+                self, "Already queued",
+                f"{result.skipped_active + result.skipped_complete:,} files already in queue",
             )
         else:
             NotificationBanner.show_warning(
@@ -1252,13 +1231,10 @@ class ReportsPage(BasePage):
                 "The download controller is not initialised",
             )
             return
-        controller.reconcile()
-        output_dir = QtCore.QSettings("MinervaFixDAT", "MinervaGUI").value(
-            "output_dir", "downloads", str,
-        )
-        svc = ReportAcquisitionService(
-            state=MinervaState(), download_controller=controller,
-            output_dir=output_dir,
+        controller.reconcile_async()
+        svc = self._app_state.reports.build_service(
+            download_controller=controller,
+            output_dir=self._app_state.output_dir,
         )
         result = svc.queue_ready(report_id, include_reviewed=True)
         log.info(
@@ -1308,7 +1284,7 @@ class ReportsPage(BasePage):
             self, "Remove report", f'Remove "{report.name}" and its review decisions?',
         ) != QtWidgets.QMessageBox.StandardButton.Yes:
             return
-        MinervaState().delete_report(report.id)
+        self._app_state.reports.delete_report(report.id)
         self._selected_report_id = None
         self.refresh()
 

@@ -25,6 +25,7 @@ from minerva.domain.reports import (
     ResolutionState,
     SelectionStrategy,
     VolumeEstimate,
+    is_approved,
 )
 from minerva_state import MinervaState
 from minerva.services.report_acquisition import romm_destination
@@ -86,6 +87,8 @@ class AcquisitionPlanner:
         same_fs = self._same_filesystem(seed_dir, output_dir)
         hardlink_ok = self._test_hardlink(seed_dir, output_dir)
         committed = self._committed_bytes(seed_dir, output_dir)
+        seed_dev = os.stat(seed_dir).st_dev
+        output_dev = os.stat(output_dir).st_dev
 
         entries = self._state.get_entries(report_id)
         candidates = self._collect_candidates(entries, constraints)
@@ -99,6 +102,7 @@ class AcquisitionPlanner:
         # Compute budgets per filesystem
         seed_budget, output_budget = self._compute_budgets(
             seed_vol, output_vol, committed, constraints, same_fs, hardlink_ok,
+            seed_dev, output_dev,
         )
 
         seed_remaining = seed_budget
@@ -107,7 +111,7 @@ class AcquisitionPlanner:
         estimated_transfer = 0
 
         for entry, file_id, size, torrent_name, dest in candidates:
-            # Size limit constraint
+            # Size limit constraint (non-mutating)
             if constraints.max_file_bytes is not None and size > constraints.max_file_bytes:
                 deferred.append(DeferredFile(
                     report_entry_id=entry.id,
@@ -117,7 +121,18 @@ class AcquisitionPlanner:
                 ))
                 continue
 
-            # Check budgets
+            # Count limit (non-mutating) — check BEFORE budget deduction
+            # so rejected files don't consume budget (P2-1 fix).
+            if constraints.max_file_count is not None and len(selected) >= constraints.max_file_count:
+                deferred.append(DeferredFile(
+                    report_entry_id=entry.id,
+                    file_id=file_id,
+                    size=size,
+                    reason="exceeds max file count",
+                ))
+                continue
+
+            # Budget checks (mutating — only after all non-mutating checks pass)
             if same_fs and hardlink_ok:
                 if size > seed_remaining:
                     deferred.append(DeferredFile(
@@ -150,15 +165,6 @@ class AcquisitionPlanner:
                 seed_remaining -= size
                 output_remaining -= size
 
-            # Check max file count
-            if constraints.max_file_count is not None and len(selected) >= constraints.max_file_count:
-                deferred.append(DeferredFile(
-                    report_entry_id=entry.id,
-                    file_id=file_id,
-                    size=size,
-                    reason="exceeds max file count",
-                ))
-                continue
 
             pf = PlannedFile(
                 report_entry_id=entry.id,
@@ -181,6 +187,7 @@ class AcquisitionPlanner:
             seed_budget - seed_remaining,
             output_budget - output_remaining,
             constraints,
+            seed_dev, output_dev,
         )
 
         report = self._state.get_report(report_id)
@@ -204,10 +211,14 @@ class AcquisitionPlanner:
     # ── Volume probing ──────────────────────────────────────────────────────
 
     def _resolve_dirs(self) -> tuple[Path, Path]:
-        """Return (seed_dir, output_dir) from settings or defaults."""
-        seed = Path(self._settings.get("qbit/save_path", ".qbitseed")).expanduser().resolve()
+        """Return (seed_dir, output_dir) — now the same: the output dir.
+
+        With the seed-directory eliminated, torrents download directly
+        into the output directory.  Both paths point to output_dir so
+        volume planning checks a single filesystem.
+        """
         output = Path(self._settings.get("downloads/output_dir", "downloads")).expanduser().resolve()
-        return seed, output
+        return output, output
 
     def _probe_volume(
         self,
@@ -258,13 +269,21 @@ class AcquisitionPlanner:
 
         db = self._db or MinervaDB()
         committed: dict[str, int] = {}
-        for record in self._state.list_queue():
-            if record.status not in _ACTIVE_STATUSES:
+        active_records = [
+            r for r in self._state.list_queue()
+            if r.status in _ACTIVE_STATUSES
+        ]
+        active_file_ids = [r.file_id for r in active_records]
+        file_map = {f.id: f for f in db.get_files_by_ids(active_file_ids)} if active_file_ids else {}
+        committed: dict[str, int] = {}
+        for record in active_records:
+            item = file_map.get(record.file_id)
+            if item is not None:
+                size = item.size
+            elif record.expected_size is not None and record.expected_size > 0:
+                size = record.expected_size
+            else:
                 continue
-            items = db.get_files_by_ids([record.file_id])
-            if not items:
-                continue
-            size = items[0].size
             dest = Path(record.destination)
             try:
                 dev = os.stat(dest.parent if dest.parent.exists() else dest).st_dev
@@ -312,6 +331,8 @@ class AcquisitionPlanner:
             elif rec.status in _ACTIVE_STATUSES:
                 queued_file_ids.add(rec.file_id)
 
+        # Batch-resolve all file metadata in one query (P2-2 fix).
+        file_ids_to_resolve = []
         for entry in entries:
             if entry.resolution == ResolutionState.NOT_FOUND:
                 continue
@@ -320,7 +341,22 @@ class AcquisitionPlanner:
             if entry.resolution == ResolutionState.REVIEW_REQUIRED:
                 if not constraints.include_reviewed_matches:
                     continue
-                if entry.decision not in {"accept", "fuzzy", "approved"}:
+                if not is_approved(entry):
+                    continue
+            file_id = entry.selected_file_id or entry.automatic_file_id
+            if file_id is not None:
+                file_ids_to_resolve.append(file_id)
+        file_map = {f.id: f for f in db.get_files_by_ids(file_ids_to_resolve)} if file_ids_to_resolve else {}
+
+        for entry in entries:
+            if entry.resolution == ResolutionState.NOT_FOUND:
+                continue
+            if entry.resolution == ResolutionState.READY and not constraints.include_automatic_matches:
+                continue
+            if entry.resolution == ResolutionState.REVIEW_REQUIRED:
+                if not constraints.include_reviewed_matches:
+                    continue
+                if not is_approved(entry):
                     continue
 
             file_id = entry.selected_file_id or entry.automatic_file_id
@@ -332,10 +368,9 @@ class AcquisitionPlanner:
             if file_id in completed_file_ids:
                 continue
 
-            items = db.get_files_by_ids([file_id])
-            if not items:
+            item = file_map.get(file_id)
+            if item is None:
                 continue
-            item = items[0]
             size = item.size
 
             if constraints.collections and item.collection not in constraints.collections:
@@ -379,8 +414,6 @@ class AcquisitionPlanner:
         # REPORT_ORDER — keep original
         return candidates
 
-    # ── Budget computation ──────────────────────────────────────────────────
-
     @staticmethod
     def _compute_budgets(
         seed_vol: shutil._ntuple_diskusage,
@@ -389,6 +422,8 @@ class AcquisitionPlanner:
         constraints: AcquisitionConstraints,
         same_fs: bool,
         hardlink_ok: bool,
+        seed_dev: int,
+        output_dev: int,
     ) -> tuple[int, int]:
         """Compute usable budgets for seed and output volumes.
 
@@ -401,12 +436,12 @@ class AcquisitionPlanner:
                 int(total_available * 0.05),
             )
             max_total = constraints.max_total_bytes or total_available
-            committed_seed = committed.get(str(seed_vol.free), 0)
+            committed_seed = committed.get(str(seed_dev), 0)
             budget = min(max_total, total_available - reserve - committed_seed)
             return (budget, budget) if hardlink_ok else (total_available, budget)
 
-        seed_committed = committed.get(str(seed_vol.free), 0)
-        output_committed = committed.get(str(output_vol.free), 0)
+        seed_committed = committed.get(str(seed_dev), 0)
+        output_committed = committed.get(str(output_dev), 0)
         seed_reserve = max(
             constraints.reserve_free_bytes,
             int(seed_vol.free * 0.05),
@@ -432,27 +467,29 @@ class AcquisitionPlanner:
         used_seed: int,
         used_output: int,
         constraints: AcquisitionConstraints,
+        seed_dev: int,
+        output_dev: int,
     ) -> list[VolumeEstimate]:
         """Build per-volume estimates."""
         vols: list[VolumeEstimate] = []
 
-        seed_used = committed.get(str(seed_vol.free), 0) + used_seed
+        seed_used = committed.get(str(seed_dev), 0) + used_seed
         seed_fits = seed_used <= seed_vol.free - constraints.reserve_free_bytes
         vols.append(VolumeEstimate(
             path=seed_dir,
             available_bytes=seed_vol.free,
-            committed_bytes=committed.get(str(seed_vol.free), 0),
+            committed_bytes=committed.get(str(seed_dev), 0),
             newly_required_bytes=used_seed,
             reserve_bytes=constraints.reserve_free_bytes,
             fits=seed_fits,
         ))
 
-        output_used = committed.get(str(output_vol.free), 0) + used_output
+        output_used = committed.get(str(output_dev), 0) + used_output
         output_fits = output_used <= output_vol.free - constraints.reserve_free_bytes
         vols.append(VolumeEstimate(
             path=output_dir,
             available_bytes=output_vol.free,
-            committed_bytes=committed.get(str(output_vol.free), 0),
+            committed_bytes=committed.get(str(output_dev), 0),
             newly_required_bytes=used_output,
             reserve_bytes=constraints.reserve_free_bytes,
             fits=output_fits,

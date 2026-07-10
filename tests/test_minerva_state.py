@@ -3,13 +3,9 @@ Unit tests for minerva_state
 ===========================
 Run with: python -m pytest tests/test_minerva_state.py -v
 """
-import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-
-# Add project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from minerva_state import MinervaState
 

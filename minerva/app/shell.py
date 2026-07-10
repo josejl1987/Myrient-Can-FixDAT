@@ -49,8 +49,8 @@ class AppShell(QtWidgets.QMainWindow):
     ``geometry``, ``window_state``, ``splitter_sizes``, ``current_tab``,
     ``ui/density``.
 
-    Pages own their own QSettings keys: ``qbit_url``, ``qbit_user``,
-    ``qbit_pass``, ``output_dir``, ``use_qbit``, ``recent_files``.
+    Pages own their own QSettings keys: ``output_dir``, ``torrent_dir``,
+    ``index_path``, and ``recent_files``.
     AppState owns zero settings keys.
 
     Parameters
@@ -82,13 +82,12 @@ class AppShell(QtWidgets.QMainWindow):
         self._stack = QtWidgets.QStackedWidget()
         self._current_page_id: PageId = PageId.REPORTS
 
-        # ── Download controller (qBittorrent) ─────────────────────────
-        self._qbit_settings_watcher: QtCore.QTimer | None = None
+        # ── Download controller (native torrent engine) ─────────────────────────
         self._download_controller: DownloadController | None = None
         self._closed: bool = False
 
         # Native QMainWindow chrome (no FramelessWindowHint)
-        self.setWindowTitle("Minerva FixDAT")
+        self.setWindowTitle("Minerva Can FixDAT")
 
         self._init_actions()
         self._init_ui()
@@ -122,7 +121,7 @@ class AppShell(QtWidgets.QMainWindow):
     def show_page(self, page_id: PageId) -> None:
         """Show a page, respecting the current page's dirty-state contract."""
         current = self._stack.currentWidget()
-        if current is not None and current is not self._registry._cache.get(page_id):
+        if current is not None and current is not self._registry.get_cached(page_id):
             if hasattr(current, "can_deactivate") and not current.can_deactivate():
                 if self._sidebar is not None:
                     self._sidebar.set_active(self._current_page_id)
@@ -135,6 +134,14 @@ class AppShell(QtWidgets.QMainWindow):
             self._stack.addWidget(page)
             self._restore_page_layout(page_id, page)
             apply_a11y_defaults(page)
+            # Wire page-level signals to the shell's status bar and
+            # notification system so pages don't need to do it themselves.
+            if hasattr(page, "notification_requested"):
+                page.notification_requested.connect(self._on_page_notification)
+            if hasattr(page, "status_message_requested"):
+                page.status_message_requested.connect(
+                    lambda msg: self.statusBar().showMessage(msg, 5000)
+                )
         self._stack.setCurrentWidget(page)
         self._current_page_id = page_id
         if self._sidebar is not None:
@@ -159,7 +166,7 @@ class AppShell(QtWidgets.QMainWindow):
                     widget.apply_density(self._density)
 
     def reload_download_controller(self) -> None:
-        """Recreate qBittorrent services after connection settings change."""
+        """Recreate native libtorrent services after settings changes."""
         if self._download_controller is not None:
             self._download_controller.stop_monitoring()
             self._download_controller.deleteLater()
@@ -281,7 +288,7 @@ class AppShell(QtWidgets.QMainWindow):
         return None
 
     def _save_page_layouts(self, settings: QtCore.QSettings) -> None:
-        for page_id, page in self._registry._cache.items():
+        for page_id, page in self._registry.iter_cached_items():
             for index, splitter in enumerate(page.findChildren(QtWidgets.QSplitter)):
                 settings.setValue(
                     f"page_layouts/{page_id.value}/splitter_{index}",
@@ -301,13 +308,51 @@ class AppShell(QtWidgets.QMainWindow):
     # ── Download controller lifecycle ────────────────────────────────────
 
     def _create_download_controller(self) -> None:
-        """Build the persistent download controller backed by native libtorrent."""
+        """Build the persistent download controller backed by native libtorrent.
+
+        Resolves all relative paths to absolute so consumers (DownloadsPage,
+        LibraryPage, etc.) never silently create empty databases at a stale
+        CWD-relative location.  The resolved absolute paths are persisted
+        back to QSettings so every reader benefits.
+        """
+        from minerva_db import DEFAULT_INDEX_PATH, DEFAULT_TORRENT_DIR
+
+        # Anchor: project root = shell.py's parent's parent's parent.
+        _proj_root = Path(__file__).resolve().parent.parent.parent
+
         settings = QtCore.QSettings(self._settings_org, self._settings_app)
         output_dir = settings.value("output_dir", "downloads", str)
         index_path = settings.value("index_path", str(DEFAULT_INDEX_PATH), str)
         state_path = settings.value("state_db_path", "data/minerva_state.db", str)
+        torrent_dir = settings.value("torrent_dir", str(DEFAULT_TORRENT_DIR), str)
+
+        # Resolve relative paths to absolute, anchored to project root.
+        def _abs(p: str) -> str:
+            raw = Path(p)
+            return str(raw.expanduser().resolve()) if raw.is_absolute()                 else str((_proj_root / raw).resolve())
+
+        output_dir = _abs(output_dir)
+        index_path = _abs(index_path)
+        state_path = _abs(state_path)
+        torrent_dir = _abs(torrent_dir)
+
+        # Persist absolute paths back to QSettings so all consumers
+        # (DownloadsPage, LibraryPage, etc.) use the same resolved location.
+        settings.setValue("output_dir", output_dir)
+        settings.setValue("index_path", index_path)
+        settings.setValue("state_db_path", state_path)
+        settings.setValue("torrent_dir", torrent_dir)
+        settings.sync()
 
         try:
+            db = MinervaDB(index_path)
+            if not db.ready:
+                raise RuntimeError(
+                    f"Index database not found or empty at:\n"
+                    f"  {db.path}\n"
+                    f"Run: python minerva_cli.py index\n"
+                    f"to rebuild it from your torrent files."
+                )
             client = NativeTorrentSession(
                 save_dir=output_dir,
                 seed_ratio=2.0,
@@ -316,7 +361,6 @@ class AppShell(QtWidgets.QMainWindow):
                 max_active_seeds=10,
             )
             client.start()
-            db = MinervaDB(index_path)
             state = MinervaState(state_path)
             controller = DownloadController(state, self._app_state, client, output_dir)
             controller.queue_changed.connect(self._app_state.queue_changed.emit)
@@ -325,11 +369,12 @@ class AppShell(QtWidgets.QMainWindow):
             controller.activity_event.connect(self._app_state.activity_event.emit)
             controller.file_spec_resolver = lambda file_id: db.get_download_spec(
                 file_id,
-                Path(settings.value("torrent_dir", str(DEFAULT_TORRENT_DIR), str)),
+                torrent_dir,
             )
             self._download_controller = controller
             self._app_state.index_db = db
-            self._app_state.qbit_state = True  # native session always connected
+            self._app_state.index_db_path = index_path
+            self._app_state.torrent_engine_state = True
         except Exception as exc:
             log.warning("Download controller unavailable: %s", exc, exc_info=True)
             self._download_controller = None
@@ -339,6 +384,24 @@ class AppShell(QtWidgets.QMainWindow):
         """Display a non-blocking status bar error message."""
         self.statusBar().showMessage(f"Error: {message}", 5000)
 
+    def _on_page_notification(self, payload: object) -> None:
+        """Route a page notification to the appropriate banner type.
+
+        ``payload`` is expected to be a simple object with ``kind`` (one of
+        ``"info"``, ``"success"``, ``"warning"``, ``"error"``), ``title``,
+        and optional ``body`` attributes.
+        """
+        kind = getattr(payload, "kind", "info")
+        title = getattr(payload, "title", "")
+        body = getattr(payload, "body", "")
+        from minerva.ui.widgets.notification_banner import NotificationBanner
+        method = {
+            "info": NotificationBanner.show_info,
+            "success": NotificationBanner.show_success,
+            "warning": NotificationBanner.show_warning,
+            "error": NotificationBanner.show_error,
+        }.get(kind, NotificationBanner.show_info)
+        method(self, title, body)
     # ── Drag-and-drop ───────────────────────────────────────────────────
 
     def dragEnterEvent(self, event: QtGui.QDragEnterEvent) -> None:
@@ -360,13 +423,13 @@ class AppShell(QtWidgets.QMainWindow):
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
         super().showEvent(event)
-        # Start the qBittorrent monitor once the window is first shown.
+        # Start the native torrent engine monitor once the window is first shown.
         # start_monitoring is idempotent (no-op if already running).
         if self._download_controller is not None:
             self._download_controller.start_monitoring()
 
     def __del__(self) -> None:
-        # Best-effort: stop the qBittorrent monitor QThread before the
+        # Best-effort: stop the native torrent engine monitor QThread before the
         # parent-child cascade deletes it during GC. Qt aborts ("QThread:
         # Destroyed while thread is still running") otherwise, and
         # pytest-qt's addWidget never calls closeEvent at teardown.

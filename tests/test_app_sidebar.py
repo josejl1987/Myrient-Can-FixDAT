@@ -47,7 +47,7 @@ def test_sidebar_rows_have_correct_labels(qtbot):
     qtbot.add_widget(sidebar)
 
     expected_labels = {
-        PageId.REPORTS: "Fix Reports",
+        PageId.REPORTS: "Reports",
         PageId.LIBRARY: "Library",
         PageId.DOWNLOADS: "Downloads",
         PageId.SETTINGS: "Settings",

@@ -42,3 +42,31 @@ class TaskRunner(QtCore.QRunnable):
             self.signals.result.emit(result)
         finally:
             self.signals.finished.emit()
+
+    @classmethod
+    def wrap_result(cls, function, *args, **kwargs) -> TaskRunner:
+        """Wrap *function* so its return value becomes an ``OperationResult``.
+
+        * If the callable returns an ``OperationResult``, it flows through
+          unchanged.
+        * If it returns any other value, it's wrapped in
+          ``OperationResult.success(payload=...)``.
+        * If it raises, the exception becomes an
+          ``OperationResult.failed(...)`` emitted via ``result`` (not
+          ``error``), so callers only need to connect to ``result``.
+        """
+        from minerva.ui.result import OperationResult
+
+        def _wrapped(*a, **kw):
+            try:
+                value = function(*a, **kw)
+            except Exception as exc:  # noqa: BLE001
+                return OperationResult.from_exception(exc, stage=getattr(function, "__name__", "task"))
+            if isinstance(value, OperationResult):
+                return value
+            return OperationResult.success(
+                summary=f"{getattr(function, '__name__', 'task')} completed",
+                payload=value,
+            )
+
+        return cls(_wrapped, *args, **kwargs)

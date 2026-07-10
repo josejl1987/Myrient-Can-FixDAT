@@ -11,18 +11,11 @@ Reuses ``_build_test_index`` and fixtures from
 from __future__ import annotations
 
 import os
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# ── Project root on sys.path ─────────────────────────────────-------------
-_HERE = Path(__file__).parent
-_PROJECT_ROOT = _HERE.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 from minerva.domain.reports import (
     AcquisitionConstraints,
@@ -40,7 +33,7 @@ from minerva.domain.reports import (
     SelectionStrategy,
 )
 from minerva_state import MinervaState
-from minerva_db import DatEntry, MinervaDB, SCHEMA_V3, stem_from_romname
+from minerva_db import DatEntry, MinervaDB, stem_from_romname
 
 # Import the module functions we need to test directly
 from minerva.services.report_acquisition import (
@@ -250,7 +243,7 @@ class TestInferScopeFromFilename:
 class TestInferScopeFromDistribution:
     """Uses a real MinervaDB backed by the test index."""
 
-    def test_all_same_scope(self, test_index, test_db):
+    def test_all_same_scope(self, test_db):
         entries = [
             DatEntry(filename="Super Mario Bros (World).zip", size=102400),
             DatEntry(filename="The Legend of Zelda (USA).zip", size=204800),
@@ -338,7 +331,7 @@ class TestServiceInferScope:
     def test_distribution_fallback(self, service, tmp_path):
         """When CSV has no scope info and no path/filename match,
         falls through to distribution inference."""
-        csv = tmp_path / "unknown.csv"
+        csv = tmp_path / "zz_scope_test.csv"
         csv.write_text(
             "name,size\n"
             "Super Mario Bros (World).zip,102400\n"
@@ -1023,7 +1016,7 @@ class TestInferScopeDatDistribution:
     def test_dat_with_distribution(self, service, tmp_path):
         """DAT file whose entries match a single scope via distribution."""
         # Create a minimal .dat that matches NES entries
-        dat = tmp_path / "unknown.dat"
+        dat = tmp_path / "zz_scope_test.dat"
         dat.write_text(
             '<?xml version="1.0"?>'
             '<datafile>'
@@ -1047,17 +1040,9 @@ class TestInferScopeDatDistribution:
 # We replicate the key fixtures here to keep this file self-contained.
 
 @pytest.fixture
-def test_index(tmp_path):
-    """Create a small test index database (replicates companion module's fixture)."""
-    db_path = tmp_path / "test_index.db"
-    _build_test_index(str(db_path))
-    return db_path
-
-
-@pytest.fixture
-def test_db(test_index):
-    """Return a MinervaDB instance backed by the test index."""
-    return MinervaDB(db_path=test_index)
+def test_db(indexed_rom_db):
+    """Return a MinervaDB instance backed by the shared test index."""
+    return indexed_rom_db
 
 
 @pytest.fixture
@@ -1075,63 +1060,3 @@ def service(tmp_state, test_db):
     """Return a ReportAcquisitionService with an isolated state database
     and the test index."""
     return ReportAcquisitionService(state=tmp_state, db=test_db)
-
-
-def _build_test_index(path: str) -> None:
-    """Build a small test index with known files."""
-    import sqlite3
-
-    conn = sqlite3.connect(path)
-    conn.execute("PRAGMA journal_mode = OFF")
-    conn.execute("PRAGMA synchronous = OFF")
-    conn.executescript(SCHEMA_V3)
-
-    test_files = [
-        (1, "super mario bros (world)", "Super Mario Bros (World).zip",
-         "test_torrent.torrent", 1, 102400, "Super Mario Bros (World).zip",
-         "Nintendo", "Nintendo - Nintendo Entertainment System"),
-        (2, "the legend of zelda (usa)", "The Legend of Zelda (USA).zip",
-         "test_torrent.torrent", 2, 204800, "The Legend of Zelda (USA).zip",
-         "Nintendo", "Nintendo - Nintendo Entertainment System"),
-        (3, "metroid (usa)", "Metroid (USA).zip",
-         "test_torrent.torrent", 3, 409600, "Metroid (USA).zip",
-         "Nintendo", "Nintendo - Nintendo Entertainment System"),
-        (4, "sonic the hedgehog (usa)", "Sonic the Hedgehog (USA).zip",
-         "test_torrent2.torrent", 1, 512000, "Sonic the Hedgehog (USA).zip",
-         "Sega", "Sega - Mega Drive - Genesis"),
-        (5, "game boy color bios", "Game Boy Color BIOS.bin",
-         "test_torrent3.torrent", 1, 0, "Game Boy Color BIOS.bin",
-         "Nintendo", "Nintendo - Game Boy Color"),
-        (6, "pokemon red (usa)", "Pokemon Red (USA).zip",
-         "test_torrent3.torrent", 2, 524288, "Pokemon Red (USA).zip",
-         "Nintendo", "Nintendo - Game Boy Color"),
-        (7, "pokemon blue (usa)", "Pokemon Blue (USA).zip",
-         "test_torrent3.torrent", 3, 524288, "Pokemon Blue (USA).zip",
-         "Nintendo", "Nintendo - Game Boy Color"),
-    ]
-
-    conn.executemany(
-        """INSERT INTO files (id, stem, basename, torrent, select_idx, size,
-                              path_full, collection, system)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        test_files,
-    )
-
-    conn.execute(
-        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
-        ("test_torrent.torrent", "Nintendo", "Nintendo - Nintendo Entertainment System", 3),
-    )
-    conn.execute(
-        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
-        ("test_torrent2.torrent", "Sega", "Sega - Mega Drive - Genesis", 1),
-    )
-    conn.execute(
-        "INSERT INTO torrents (name, collection, system, file_count) VALUES (?, ?, ?, ?)",
-        ("test_torrent3.torrent", "Nintendo", "Nintendo - Game Boy Color", 3),
-    )
-
-    conn.execute(
-        "INSERT OR REPLACE INTO schema_meta (key, value) VALUES ('schema_version', '3')",
-    )
-    conn.commit()
-    conn.close()

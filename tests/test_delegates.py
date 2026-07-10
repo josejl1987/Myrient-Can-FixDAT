@@ -1,19 +1,23 @@
 """
-Tests for ``DisplayDelegate``, ``SizeDelegate``, and ``CheckboxDelegate``.
+Tests for ``DisplayDelegate``, ``IconDelegate``, ``SizeDelegate``, and
+``CheckboxDelegate``.
 
 Covers: SizeDelegate binary ladder (0, KB, MB, GB, negative),
-DisplayDelegate pass-through, CheckboxDelegate click toggle.
+DisplayDelegate pass-through, IconDelegate sizeHint, CheckboxDelegate
+click toggle.
 """
 
-from __future__ import annotations
-
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QTableView
 
-from minerva.ui.models.delegates import CheckboxDelegate, DisplayDelegate, SizeDelegate
-from minerva.ui.models.record_model import QueueItemRecordModel, _QUEUE_COLUMNS
-
+from minerva.ui.models.delegates import (
+    CheckboxDelegate,
+    DisplayDelegate,
+    IconDelegate,
+    SizeDelegate,
+)
+from minerva.ui.models.record_model import _QUEUE_COLUMNS, QueueItemRecordModel
 
 # ============================================================================
 # DisplayDelegate
@@ -35,11 +39,37 @@ def test_display_text_number(qtbot):
     result = delegate.displayText(42, QtCore.QLocale())
     assert result == "42"
 
+# ============================================================================
+# IconDelegate
+# ============================================================================
+
+
+def test_icon_delegate_size_hint(qtbot):
+    """GIVEN IconDelegate WHEN sizeHint is called THEN it returns a
+    reasonable fixed size for a 16px icon."""
+    delegate = IconDelegate()
+    option = QtWidgets.QStyleOptionViewItem()
+    size = delegate.sizeHint(option, QtCore.QModelIndex())
+    assert size.width() >= 24
+    assert size.height() >= 24
+
+
+def test_icon_delegate_paint_no_crash_empty(qtbot):
+    """GIVEN IconDelegate WHEN paint is called with an empty index
+    THEN it does not crash (no icon name to render)."""
+    delegate = IconDelegate()
+    pixmap = QtGui.QPixmap(100, 40)
+    pixmap.fill()
+    painter = QtGui.QPainter(pixmap)
+    option = QtWidgets.QStyleOptionViewItem()
+    option.rect = QtCore.QRect(0, 0, 100, 40)
+    delegate.paint(painter, option, QtCore.QModelIndex())
+    painter.end()
+
 
 # ============================================================================
 # SizeDelegate
 # ============================================================================
-
 
 def test_size_zero(qtbot):
     """GIVEN SizeDelegate WHEN displayText(0) is called THEN \"0 B\" is

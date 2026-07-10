@@ -23,6 +23,13 @@ class DownloadControllerProtocol(Protocol):
         file_id: int,
         destination: str,
         report_entry_id: str | None = None,
+        source: str = "minerva_torrent",
+        source_ref: str | None = None,
+        report_id: str | None = None,
+        expected_size: int | None = None,
+        expected_hash: str | None = None,
+        torrent_url: str | None = None,
+        torrent_member_path: str | None = None,
     ) -> str | None:
         ...
 
@@ -81,8 +88,8 @@ class DownloadFileSpec:
     system: str
 
     @property
-    def qbit_file_index(self) -> int:
-        """Return qBittorrent's zero-based file index."""
+    def torrent_file_index(self) -> int:
+        """Return native torrent engine's zero-based file index."""
         return max(0, self.select_index - 1)
 
 
@@ -99,7 +106,7 @@ class TorrentFileInfo:
 
 @dataclass(frozen=True, slots=True)
 class TorrentInfo:
-    """Point-in-time torrent state (qBittorrent or native libtorrent)."""
+    """Point-in-time torrent state (native torrent engine or native libtorrent)."""
 
     hash: str
     name: str
@@ -129,7 +136,7 @@ class DownloadRuntime:
     """
 
     record_id: str
-    qbit_hash: str | None
+    torrent_hash: str | None
     torrent_name: str
     progress: float = 0.0
     download_speed: int = 0
@@ -161,7 +168,7 @@ class QueueRecord:
     report_id: str | None = None
     report_name: str = ""
     status: str = DownloadStatus.QUEUED.value
-    qbit_hash: str | None = None
+    torrent_hash: str | None = None
     destination: str = ""
     error: str | None = None
     created_at: str = ""
@@ -174,3 +181,8 @@ class QueueRecord:
     # ── Multi-source (archive.org) ──────────────────────────────────────
     source: str = "minerva_torrent"  # DownloadSource value
     source_ref: str | None = None    # file_id substitute for non-Minerva sources
+    # ── Source-aware validation metadata ───────────────────────────────────
+    expected_size: int | None = None
+    expected_hash: str | None = None
+    torrent_url: str | None = None
+    torrent_member_path: str | None = None
